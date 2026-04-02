@@ -1,0 +1,17 @@
+{
+    "ri" : 0.339,
+    "re" : 0.423,
+    "ri_adv" : 0.4046,
+    "advTF" : 0.2385,
+    "lz" : 0.1,
+    "nr" : 20,
+    "nz" : 5,
+
+    "objective_derivative" : "Jaumann",
+    "int_scheme" : "Euler",
+    "n_int" : 30,
+    "XDMF_export" : 1,
+    
+    "load_phase":  [[15, 0, 0.048, 0],
+                    [30, 0, 0.048, 120]]
+}

@@ -1,0 +1,59 @@
+{
+    "matrix" : {
+        "type": "matrix",
+        "young" : 0.1,
+        "young_type" : "Constant",
+        "poisson" : 0.45
+    },
+    "cells": {
+        "type": "homeostatic spheroid",
+        "young": 0.1,
+        "young_type" : "Constant",
+        "poisson" : 0.45,
+        "volumic_fraction": 0.24,
+        "shape_ratio": 0.161,
+        "theta": 90,
+        "phi": 90,
+        "characteristic time" : 5,
+        "basal stress" : 0.1,
+        "max active strain": 1.3, 
+        "min active strain": 0.6,
+        "threshold steepness": 50
+    },
+    "collagen0" :{
+            "type": "cylinder",
+            "young" : [[0.67],[3.64],[1.1]],
+            "young_type":"Exponential",
+            "poisson" : 0.34,
+            "volumic_fraction" : 0.0575,
+            "theta" : -41,
+            "phi" : 90
+    },
+    "collagen1" :{
+            "type": "cylinder",
+            "young" : [[0.67],[3.64],[1.1]],
+            "young_type":"Exponential",
+            "poisson" : 0.34,
+            "volumic_fraction" : 0.0575,
+            "theta" : 41,
+            "phi" : 90
+    },
+    "collagen2" :{
+            "type": "cylinder",
+            "young" : [[0.67],[3.64],[1.1]],
+            "young_type":"Exponential",
+            "poisson" : 0.34,
+            "volumic_fraction" : 0.0575,
+            "theta" : -59.5,
+            "phi" : 90
+    },
+    "collagen3" :{
+            "type": "cylinder",
+            "young" : [[0.67],[3.64],[1.1]],
+            "young_type":"Exponential",
+            "poisson" : 0.34,
+            "volumic_fraction" : 0.0575,
+            "theta" : 59.5,
+            "phi" : 90
+    }
+}
