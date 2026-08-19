@@ -37,10 +37,12 @@ from matplotlib.transforms import Bbox
 mpl.rcParams['text.usetex'] = True
 
 plt.rcParams.update({
-    "text.usetex": True,          # use LaTeX for all text
-    "font.family": "serif",       # LaTeX default serif font
-    "font.serif": ["Computer Modern"],  # optional, match LaTeX
-    "axes.labelsize": 10,         # adjust label size
+    "text.usetex": True,
+    # Inject Latin Modern and T1 font encoding into the LaTeX preamble
+    "text.latex.preamble": r"\usepackage[T1]{fontenc} \usepackage{lmodern}",
+    "font.family": "serif",
+    "font.serif": ["Latin Modern Roman"], # Matches your thesis main text
+    "axes.labelsize": 10,
     "xtick.labelsize": 9,
     "ytick.labelsize": 9,
     "legend.fontsize": 9
@@ -57,7 +59,7 @@ from ChIV_ModellingPassiveArterialTissue.main_ArterialTissue_25_06_04 import (
 )
 
 from Multiscale_Framework.function_modules.discretization_collagen import  (
-    discretizing_distribution,
+    load_and_discretize_distribution,
     plot_discrete_vs_continuous,
     load_continuous_distribution,
     project_discrete_to_grid_centered_bins
@@ -281,7 +283,7 @@ plt.show()
 # load and discretize collagen fibers in the adventitia
 N = len(collagen_keys_adventitia) # number of collagen families -> already initialized in the json, should be cleaned
 filename = "ChIV_ModellingPassiveArterialTissue/passive_calibration/avg_density_Low.npz" # experimental continuous distribution
-theta_coll_adv, weights_coll_adv = discretizing_distribution(filename, N, name+'_init', folder_name, plot=True, verbose=False) # function in discretization_collagen.py
+theta_coll_adv, weights_coll_adv = load_and_discretize_distribution(filename, N, name+'_init', folder_name, plot=True, verbose=False) # function in discretization_collagen.py
 f_coll_adv= 0.5
 
 for j, key in enumerate(collagen_keys_adventitia): # change the discrete distribution to correspond to the discretized experimental one
@@ -409,7 +411,7 @@ ax1.set_ylabel('Axial stretch $\lambda_z$')
 
 # --- Right y-axis: Pressure ---
 ax2 = ax1.twinx()
-ax2.plot(steps, press_list, color='tab:orange', label='$P$')
+ax2.plot(steps, press_list, color='tab:red', label='$P_{blood}$')
 ax2.set_ylabel('Pressure [mmHg]')
 
 # --- X-axis: step number / phase numbering ---

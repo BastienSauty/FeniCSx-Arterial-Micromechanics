@@ -24,10 +24,12 @@ import matplotlib as mpl
 mpl.rcParams['text.usetex'] = True
 
 plt.rcParams.update({
-    "text.usetex": True,          # use LaTeX for all text
-    "font.family": "serif",       # LaTeX default serif font
-    "font.serif": ["Computer Modern"],  # optional, match LaTeX
-    "axes.labelsize": 10,         # adjust label size
+    "text.usetex": True,
+    # Inject Latin Modern and T1 font encoding into the LaTeX preamble
+    "text.latex.preamble": r"\usepackage[T1]{fontenc} \usepackage{lmodern}",
+    "font.family": "serif",
+    "font.serif": ["Latin Modern Roman"], # Matches your thesis main text
+    "axes.labelsize": 10,
     "xtick.labelsize": 9,
     "ytick.labelsize": 9,
     "legend.fontsize": 9
@@ -40,7 +42,7 @@ os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
-from Multiscale_Framework.function_modules.discretization_collagen import discretizing_distribution, plot_discrete_vs_continuous, project_discrete_to_grid_centered_bins, RMSE_L2, normalized_moment_error
+from Multiscale_Framework.function_modules.discretization_collagen import load_and_discretize_distribution, plot_discrete_vs_continuous, project_discrete_to_grid_centered_bins, RMSE_L2, normalized_moment_error
 
 def load_JSON(card_name):
     print('Opening card : '+card_name)
@@ -94,7 +96,7 @@ def pipeline_SA(N, dta_sample, name, folder_name, simu_card, media_card, adventi
     
     # Discretization
     filename_exp_collagen_distrib = f'ChIV_ModellingPassiveArterialTissue/passive_calibration/sample_data/{dta_sample}_density_Low.npz'
-    theta_coll_adv, weights_coll_adv = discretizing_distribution(filename_exp_collagen_distrib, N, f'{dta_sample}_{name}_{N}_init', folder_name, plot=False, verbose=False) # function in discretization_collagen.py
+    theta_coll_adv, weights_coll_adv = load_and_discretize_distribution(filename_exp_collagen_distrib, N, f'{dta_sample}_{name}_{N}_init', folder_name, plot=False, verbose=False) # function in discretization_collagen.py
     
     f_tot = 0.5
     weights_coll_adv *= f_tot
@@ -381,7 +383,7 @@ if __name__ == "__main__":
                                  color=colors[i], alpha=0.2)  # Shaded region
         
         plt.xlabel('Number of families')
-        plt.ylabel(f'{error_keyword} - mean $\pm$ confidence 95\%')
+        plt.ylabel(rf'{error_keyword} - mean $\pm$ confidence 95\%')
         plt.grid(True, linestyle='--', alpha=0.3)
         plt.ylim([1e-3, 1e-1])
         # plt.ylim([1e-2, 2e2])    

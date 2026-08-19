@@ -1,363 +1,287 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Thu Jul 17 15:49:28 2025
+Created on Sun Aug  9 09:21:55 2026
 
 @author: bastien.sauty
 
-Written with the help of Chatgpt
-Based on the work of Placido Andrea Grillo
-Based on the old version of the code - modified to have a stronger theoretical basis
+New function file for discretizing collagen fiber. 
+The goal is to provide a function discretizing_distribution that is usable in
+lieu and place of the old one. 
 
-Applying the principle of maximum entropy to build a statistical estimator of
-a continuous distribution into a discrete distribution
+The goal fo this module is to discretize the experimental continuous probability 
+density function of fibers into a dirac defined pdf.
+The key difference is the approach to discretization. The earlier version used 
+a projection of the dirac distrib onto the continuous space using centered bins.
+Once rotated, these centered bins lose sense. 
+The new version uses the Wasserstein distance applied on the Cumulative Density functions.
 
-BASED ON THE ASSUMPTION THAT THE CONTINUOUS DISTRIBUTION IS BASED ON EQUIDISTANT ANGLE ARRAY -> -89.5 , 89.5 with 180 points
 """
 
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import cumulative_trapezoid
 from scipy.optimize import minimize
 
-import matplotlib.pyplot as plt
+#%%
+###############################################################################
+# Functions for distribution managing : discretization, cumulative density...
+# 
+###############################################################################
 
-#-----------------------------------------------------------------------------#
-# Functions to do the optimization for maximum entropy under constraints
-#-----------------------------------------------------------------------------#
-
-def compute_continuous_moments(theta, pdf, max_order):
+def build_CDF(discrete_angles, discrete_weights, continuous_angles, integral_type='Heavyside', normalize=True):
     """
-    Compute the moments of a continuous distribution using the trapezoidal integration
-    inputs :
-        theta : continuous range for the pdf, array with this range : [-pi/2, pi/2]
-        pdf : probability density function; continuous; array of size len(theta)
-        max_order : maximal order where the moments are computed
-    outputs:
-        moments : array of size max_order containing the central moments from 1 to max_order
-                don't contain moment 0 as this is a distribution, hence is 1.    
+    Build the cumulative density function of a distribution onto the
+    continuous_angles space. For a discrete distribution, integral_type='Heavyside' 
+    is adapted for Dirac. 
+    In the case of a continuous pdf, this function can still be used. Provide equal
+    discrete_angles and continuous_angles and specify integral_type='Trapezoidal' NOT IMPLEMENTED
+
+    Parametersbuild_CDF
+    ----------
+    discrete_angles : n array
+    discrete_weights : n array
+    continuous_angles : m array, m>=n
+
+    Returns
+    -------
+    cdf : m array
     """
-    delta_theta = theta[1] - theta[0]  # Should be 1.0 for your data
-    pdf = pdf / np.sum(pdf * delta_theta)  # Normalize using rectangle integration
+    if integral_type == 'Heavyside':
+        cdf = np.zeros(continuous_angles.shape)
+        for weights_i, theta_i in zip(discrete_weights, discrete_angles):
+            zeroval = np.ones(continuous_angles.shape)
+            cdf += weights_i * np.heaviside(continuous_angles - theta_i, zeroval)
 
-    # Mean (1st moment)
-    mu = np.sum(theta * pdf) * delta_theta
+    elif integral_type == 'Trapezoidal':
+        if not np.allclose(discrete_angles, continuous_angles):
+            raise ValueError("Trapezoidal mode requires discrete_angles == continuous_angles "
+                              "(discrete_weights is treated as the pdf sampled on that grid).")
+        pdf = discrete_weights
+        cdf = cumulative_trapezoid(pdf, continuous_angles, initial=0.0)
 
-    # Central differences
-    diffs = theta - mu
+    else:
+        raise ValueError(f"Unknown integral_type: {integral_type}")
 
-    # Higher-order central moments
-    powers = np.power.outer(diffs, np.arange(1, max_order + 1))  # shape (N, max_order)
-    weighted = pdf[:, None] * powers                            # shape (N, max_order)
-    moments = np.sum(weighted, axis=0) * delta_theta            # shape (max_order,)
+    if normalize and cdf[-1] > 0:
+        cdf = cdf / cdf[-1]
 
-    return np.concatenate(([mu], moments[1:]))  # [mu, central_moment_2, ..., central_moment_K]
+    return cdf
 
-def moment_error_vectorized(discrete_theta, weights, target_moments, k, K):
+def compute_wasserstein_distance(discrete_weights, discrete_angles, continuous_cdf, continuous_angles):
     """
-    Compute RMSE between discrete and target central moments (orders k+1 to K), vectorized.
+    Return the W1 wasserstein distance between the cumulative density functions
+    of the experimental/continuous PDF and the discrete PDF. 
+
+    Parameters
+    ----------
+    discrete_weights : N array
+    discrete_angles : N array
+    continuous_cdf : m array m > N
+    continuous_angles : m array
+
+    Returns
+    -------
+    W1 : float
+    """
+    discrete_cdf = build_CDF(discrete_angles, discrete_weights, continuous_angles)
+    # For two 1D distributions with CDFs F, G on the same support, the
+    # Wasserstein-1 distance has the closed form W1(F,G) = integral |F-G| dx.
+    # (scipy.stats.wasserstein_distance expects sample VALUES, not CDF
+    # arrays -- calling it directly on discrete_cdf/continuous_cdf does not
+    # compute the distance between the two distributions.)
+    try:
+        _trapz = np.trapezoid  # numpy >= 2.0
+    except AttributeError:
+        _trapz = np.trapz      # numpy < 2.0
+    distance = _trapz(np.abs(discrete_cdf - continuous_cdf), continuous_angles)
+    return(distance)
     
-    Parameters:
-    - discrete_theta: array of Dirac support points
-    - weights: corresponding weights (should sum to 1)
-    - target_moments: array of target central moments [mu, mu2, mu3, ..., mu_K]
-    - k: number of matched moments
-    - K: maximum moment order to include in the error
+def discretizing_distribution(continuous_angles, continuous_pdf, N):
+    """
+    Build the discrete distribution defined by a set of Dirac peak equispaced. 
+    The weights are found by minimizing the error between the cumulative density function
+    defined by the wasserstein_distance
+
+    Parameters
+    ----------
+    continuous_angles : m array
+    continuous_pdf : m array
+    N : int number of families
+
+    Returns
+    -------
+    discrete_angles : N array
+    discrete_weights : N array
+    """
     
-    Returns:
-    - RMSE of higher-order moment errors (orders k+1 to K)
-    """
-    mu = np.sum(weights * discrete_theta)
-    diffs = discrete_theta - mu  # shape (N,)
+    # equally space angles
+    discrete_angles = np.linspace(min(continuous_angles), max(continuous_angles), N+1)
+    discrete_angles = 1/2*(discrete_angles[1:] + discrete_angles[:-1])
     
-    # Compute powers for orders k+1 to K (shape: N × (K - k))
-    orders = np.arange(k + 1, K + 1)
-    powers = np.power.outer(diffs, orders)  # shape (N, K-k)
     
-    # Weighted moments
-    m_discrete = np.sum(weights[:, None] * powers, axis=0)  # shape (K-k,)
-    m_target = target_moments[orders - 1]                   # shape (K-k,)
-    
-    errors = (m_discrete - m_target) ** 2
-    return np.sqrt(np.mean(errors))
-
-def RMSE_L2(angle_axis, distribution, projected):
-    """
-    Root Mean Square Error -> L2 error between the continuous and discrete projected distribution
-    """
-    delta_theta = angle_axis[1]-angle_axis[0]
-    return(np.sqrt(np.sum((distribution - projected)**2) * delta_theta))
-
-#-----------------------------------------------------------------------------#
-# Comparing discrete and continuous distribution : on the continuous angle space
-#-----------------------------------------------------------------------------#
-
-def project_discrete_to_grid_centered_bins(support_angles, weights, angle_axis):
-    """
-    build a continuous distribution based on the support_angles. These should be 
-    in ascending order. 
-    the distribution is constant piecewise. Basically it's a redistribution of the 
-    weight of one support angle to a continuous bin.
-    inputs:        
-        support_angles : dirac angle space
-        weights : dirac weights
-        angle_axis : continuous angle space
-    output :
-        projected distribution of the dirac distrib onto the continuous angle space
-    """
-    projected = np.zeros_like(angle_axis)
-    N = len(support_angles)
-
-    # Step 1: Compute bin edges based on midpoints
-    edges = np.zeros(N + 1)
-    edges[1:-1] = 0.5 * (support_angles[1:] + support_angles[:-1])
-    edges[0] = support_angles[0] - 0.5 * (support_angles[1] - support_angles[0])
-    edges[-1] = support_angles[-1] + 0.5 * (support_angles[-1] - support_angles[-2])
-
-    # Step 2: Assign weights to bins
-    for i in range(N):
-        left, right = edges[i], edges[i + 1]
-        if i==N-1:
-            mask = (angle_axis >= left) & (angle_axis <= right) # takes also the value at the end
-        else:            
-            mask = (angle_axis >= left) & (angle_axis < right)
-        count = np.sum(mask)
-        if count > 0:
-            projected[mask] = weights[i] / count
-
-    # Step 3: Normalize (just in case)
-    projected /= np.sum(projected)
-    return projected
-
-
-def normalized_moment_error(discrete_angles, discrete_weights, projected_pdf, angle_axis, max_order=6, eps=1e-12):
-    """
-    Computes the RMSE of the relative error between central moments of the discrete and projected distributions.
-
-    Each moment error is normalized by the moment from the discrete distribution.
-    """
-    # Discrete (Dirac) central moments
-    mu_d = np.sum(discrete_weights * discrete_angles)
-    moments_d = []
-    for n in range(1, max_order + 1):
-        moment = np.sum(discrete_weights * (discrete_angles - mu_d)**n)
-        moments_d.append(moment)
-
-    # Projected central moments
-    delta_theta = angle_axis[1] - angle_axis[0]
-    projected_pdf = projected_pdf / np.sum(projected_pdf * delta_theta)
-    mu_p = np.sum(angle_axis * projected_pdf) * delta_theta
-    moments_p = []
-    for n in range(1, max_order + 1):
-        moment = np.sum(((angle_axis - mu_p) ** n) * projected_pdf) * delta_theta
-        moments_p.append(moment)
-
-    # Relative squared error with small epsilon to avoid division by 0
-    rel_sq_errors = [((mp - md) / (abs(mp) + eps))**2 for md, mp in zip(moments_d, moments_p)]
-
-    return np.sqrt(np.mean(rel_sq_errors))
-
-#-----------------------------------------------------------------------------#
-# KL divergence
-#-----------------------------------------------------------------------------#
-
-def kl_loss(w, theta_dirac, angle_axis, pdf_target, eps=1e-12):
-    w = np.clip(w, eps, 1.0)
-    w /= np.sum(w)
-    
-    q = project_discrete_to_grid_centered_bins(theta_dirac, w, angle_axis)
-    q = np.clip(q, eps, 1.0)
-    
-    mask = (pdf_target > eps) & (q > eps)
-    kl = np.sum(q[mask] * np.log(q[mask] / pdf_target[mask])) * (angle_axis[1] - angle_axis[0])
-    return kl
-
-def optimize_kl(theta_dirac, angle_axis, pdf_target):
-    N = len(theta_dirac)
+    continuous_cdf = build_CDF(continuous_angles, continuous_pdf, continuous_angles, integral_type='Trapezoidal')
     w0 = np.ones(N) / N
     bounds = [(0, 1) for _ in range(N)]
     cons = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
-    result = minimize(kl_loss, w0, args=(theta_dirac, angle_axis, pdf_target), 
+    result = minimize(compute_wasserstein_distance, w0, args=(discrete_angles, continuous_cdf, continuous_angles), 
                       bounds=bounds, constraints=cons)
-    if not result.success:
-        raise RuntimeError("KL optimization failed: " + result.message)
-    return result.x
+    discrete_weights = result.x
+    return(discrete_angles, discrete_weights)
 
 
-#-----------------------------------------------------------------------------#
-# Plot the distributions
-#-----------------------------------------------------------------------------#
-
-def plot_discrete_vs_continuous(continuous_angles, continuous_density, theta_dirac, weights, projected, name, folder_name, savefig=False, verbose=True):
+def circular_dispersion_deg(theta_axis, pdf_axis):
     """
-    plot the continuous experimental distribution; the discretized distribution and the constant piece wise projected discretized distribution
-    inputs :
-        - continuous_angles : continuous angle space
-        - continuous_density : continuous (expe) density function
-        - theta_dirac : discrete angle space
-        - weights : weights of the discrete distribution
-        - projected : continuous density, interpolation of the discrete one onto the continuous space
-    """
+    Circular mean and circular standard deviation (in degrees) of a
+    pi-periodic (axial) orientation distribution, e.g. collagen fiber
+    orientation where +90 deg and -90 deg are the same physical direction.
 
-    # Create the main plot
+    Uses the standard "doubling" trick for axial data: angles are doubled
+    so that the pi-periodicity maps onto a full 2*pi circle, on which
+    ordinary circular statistics (mean resultant length R, circular std
+    sqrt(-2 ln R)) apply; the result is then halved back to the original
+    (un-doubled) angle scale.
+
+    Returns
+    -------
+    mean_angle_deg : circular mean orientation, in degrees
+    circ_std_deg : circular standard deviation, in degrees (dispersion
+        measure used to normalize the Wasserstein error)
+    R : mean resultant length in [0,1], 1 = fully concentrated (single
+        direction), 0 = uniformly spread over all orientations
+    """
+    theta_rad = np.deg2rad(theta_axis)
+    delta = theta_axis[1] - theta_axis[0]
+    weights = pdf_axis * delta
+    weights = weights / weights.sum()
+
+    C = np.sum(weights * np.cos(2 * theta_rad))
+    S = np.sum(weights * np.sin(2 * theta_rad))
+    R = np.hypot(C, S)
+
+    mean_angle_rad = 0.5 * np.arctan2(S, C)
+    circ_std_rad = 0.5 * np.sqrt(-2.0 * np.log(R))  # halved back to original scale
+
+    return np.rad2deg(mean_angle_rad), np.rad2deg(circ_std_rad), R
+
+
+
+
+
+#%%
+###############################################################################
+# Functions for plots and checkup
+# 
+###############################################################################
+
+def plot_PDF_CDF(continuous_pdf, continuous_cdf, continuous_angles, folder_name, name):
+    
     fig, ax1 = plt.subplots(figsize=(6,4))
 
-    # Plot continuous and projected PDFs
-    ax1.plot(continuous_angles, continuous_density, label="Experimental Distribution", color='blue')
-    ax1.plot(continuous_angles, projected, label="Projected Discrete Distribution", linestyle='--', color='green')
+    ax1.plot(continuous_angles, continuous_pdf, label="Experimental PDF", color='tab:blue')
     ax1.set_xlabel("Angle to axial direction [°]")
-    ax1.set_ylabel("Continuous Probability Density")
+    ax1.set_ylabel("Probability Density Function")
     ax1.grid(True, which='both', axis='both', linestyle='--', alpha=0.5)
-
-    # Create second y-axis for scatter
+    
+    
+    # Create second y-axis for pdf
     ax2 = ax1.twinx()
-    ax2.scatter(theta_dirac, weights, color='red', label="Discrete distribution")
-    ax2.set_ylabel("Discrete Probability Density", color='red')
+    ax2.plot(continuous_angles, continuous_cdf, color='tab:red', label="Experimental CDF")
+    ax2.set_ylabel("Cumulative Density Function", color='red')
     ax2.tick_params(axis='y', labelcolor='red')
-
+    
     # Add legend for scatter
     lines_labels = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines_labels[0] + lines2, lines_labels[1] + labels2,loc='lower center',bbox_to_anchor=(0.7, 1.0), bbox_transform=ax1.transAxes)
     
     plt.tight_layout()
-    if savefig:
-        plt.savefig(f'images_output/{folder_name}/{name}_orientation_distribution.pdf')
-        
-    if verbose:
-        plt.show()
-    else:
-        plt.close(fig)
-
-
-
-#-----------------------------------------------------------------------------#
-# Discretizing process
-#-----------------------------------------------------------------------------#
-def load_continuous_distribution(filename):
-    try:
-        data = np.load(filename)
-        avg_density = data['avg_density'] # experimental continuous PDF
-        angles = data['angles'] # continuous angle space
-    except:
-        print(f"error loading file {filename}, either it does not exist or the keywords avg_density and angles are not defined correctly")
-    return(angles, avg_density)
-
-def discretizing_distribution(filename, N, name, folder_name, plot=False, verbose=False):
-    """
-    Function to discretize a continuous distribution 
-    Inputs : 
-        filename : npz file containing the continuous distribution named "avg_density" with an continuous space named "angles"
-        N : number of discrete samples for the discretization
-        error_metric : in ['L2', 'TV', 'KL', 'JS', 'EMD']
-        plot and verbose : flags for export and print some results
-        
-    outputs : support_angles, weights and error metric
-    """
-    continuous_angles, continuous_density = load_continuous_distribution(filename)
+    plt.savefig(f'images_output/{folder_name}/{name}_pdf_cdf.pdf')
+    plt.show()
     
-    theta_dirac = np.linspace(-89.5, 89.5, N+1)
-    theta_dirac = 1/2*(theta_dirac[1:] + theta_dirac[:-1])
+
+def plot_CDF_discrete(discrete_cdf, continuous_cdf, continuous_angles, folder_name, name):
     
-    weights_KL = optimize_kl(theta_dirac, continuous_angles, continuous_density)
+    fig, ax1 = plt.subplots(figsize=(5,4))
 
-    projected = project_discrete_to_grid_centered_bins(theta_dirac, weights_KL, continuous_angles)
-    l2_error = RMSE_L2(continuous_angles, continuous_density, projected)
-    if verbose:
-        for angle, weight in zip(theta_dirac, weights_KL):
-            print(f"Angle: {angle:.1f}°, Weight: {weight:.3f}")
-            print(f"L2 Error: {l2_error:.4f}")
-    if plot:
-        plot_discrete_vs_continuous(continuous_angles, continuous_density, theta_dirac, weights_KL, projected, name, folder_name, savefig=True, verbose=False)
-    return([theta_dirac, weights_KL])
+    ax1.plot(continuous_angles, continuous_cdf, label="Experimental CDF", color='tab:blue')
+    ax1.plot(continuous_angles, discrete_cdf, label="Discrete CDF", color='tab:red')
+    ax1.set_xlabel("Angle to axial direction [°]")
+    ax1.set_ylabel("Cumulative Density Function")
+    ax1.grid(True, which='both', axis='both', linestyle='--', alpha=0.5)
+    
+    
+    # Add legend for scatter
+    lines_labels = ax1.get_legend_handles_labels()
+    ax1.legend(lines_labels[0], lines_labels[1], loc='lower right')#,bbox_to_anchor=(0.7, 1.0), bbox_transform=ax1.transAxes)
+    
+    plt.tight_layout()
+    plt.savefig(f'images_output/{folder_name}/{name}_cdf.pdf')
+    plt.show()
+    
+def plot_PDF_discrete(discrete_weights, discrete_angles, continuous_pdf, continuous_angles, folder_name, name):
+    
+    fig, ax1 = plt.subplots(figsize=(5,4))
 
-# %% 
-# Main code
+    ax1.plot(continuous_angles, continuous_pdf, label="Experimental PDF", color='tab:blue')
+    ax1.set_xlabel("Angle to axial direction [°]")
+    ax1.set_ylabel("Probability Density Function")
+    ax1.grid(True, which='both', axis='both', linestyle='--', alpha=0.5)
+    ax1.set_ylim([0, None])
+    
+    # Create second y-axis for pdf
+    ax2 = ax1.twinx()
+    ax2.scatter(discrete_angles, discrete_weights, color='tab:red', label="Discrete PDF")
+    ax2.set_ylabel("Discrete Probability Density Function", color='red')
+    ax2.tick_params(axis='y', labelcolor='red')
+    ax2.set_ylim([0, None])
+    
+    # Add legend for scatter
+    lines_labels = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines_labels[0] + lines2, lines_labels[1] + labels2,loc='lower center')# ,bbox_to_anchor=(0.7, 1.0), bbox_transform=ax1.transAxes)
+    
+    plt.tight_layout()
+    plt.savefig(f'images_output/{folder_name}/{name}_pdf.pdf')
+    plt.show()
+    
+
+
+#%%
+###############################################################################
+# Main for standalone file
+# 
+###############################################################################
 
 if __name__=='__main__':
     #-----------------------------------------------------------------------------#
     # Load the experimental continuous distribution
     #-----------------------------------------------------------------------------#
     
-    # Load Low continuous distribution
-    keyword = 'Low'
-    data = np.load('avg_density_Low.npz')
-    avg_Low_density = data['avg_density'] # experimental continuous PDF
-    angles_Low = data['angles'] # continuous angle space
-    avg_Low_density /= np.trapz(avg_Low_density, angles_Low) # normalization
+    data = np.load('collagen_media_orientation_OConnell2008.npz')
     
-    # Support angles for the discrete distrib
-    list_k = np.arange(3, 41)
-    errors_representation = np.zeros(list_k.shape)
-    errors_projection = np.zeros(list_k.shape)
-    errors_discretization = np.zeros(list_k.shape)
-    discretization = {}
-    for i, k in enumerate(list_k):
-        print(k)
-        theta_dirac = np.linspace(-89.5, 89.5, k+1)
-        theta_dirac = 1/2*(theta_dirac[1:] + theta_dirac[:-1])
-        
-        weights_KL = optimize_kl(theta_dirac, angles_Low, avg_Low_density)
-        projected_KL = project_discrete_to_grid_centered_bins(theta_dirac, weights_KL, angles_Low)
-        #plot_discrete_vs_continuous('Low', angles_Low, avg_Low_density, theta_dirac, weights_KL, projected_KL)
-        
-        error_L2 = RMSE_L2(angles_Low, avg_Low_density, projected_KL)
-        error_moments = normalized_moment_error(theta_dirac, weights_KL, projected_KL, angles_Low, max_order=4)
-        error_total = normalized_moment_error(theta_dirac, weights_KL, avg_Low_density, angles_Low, max_order=4)
-        
-        discretization[k] = [theta_dirac, weights_KL, error_L2, error_moments, error_total]
-        errors_representation[i] = error_L2
-        errors_projection[i] = error_moments
-        errors_discretization[i] = error_total
-    
-    #%%
-    # Plot the l2 error between projection and experimental
-    plt.figure(figsize=(4,3))
-    plt.plot(list_k, errors_representation, marker='+', linestyle='-', linewidth=1, alpha=0.8)
-    plt.xlabel('Number of families')
-    plt.ylabel('L2 Error')
-    plt.grid(True, linestyle='--', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig('outputs/L2error_discretization_Low.pdf')
-    plt.show()
-    #%%
-    # Plot the moments error between the dirac and its projection
-    plt.figure(figsize=(4,3))
-    plt.semilogy(list_k, errors_projection, marker='+', linestyle='-', linewidth=1, alpha=0.8)
-    plt.xlabel('Number of families')
-    plt.ylabel('Projection Error - Moments RMSE')
-    plt.grid(True, linestyle='--', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig('outputs/Projection_error_Low.pdf')
-    plt.show()
-    
-    plt.figure(figsize=(4,3))
-    plt.semilogy(list_k, errors_discretization, marker='+', linestyle='-', linewidth=1, alpha=0.8)
-    plt.xlabel('Number of families')
-    plt.ylabel('Projection Error - Moments RMSE')
-    plt.grid(True, linestyle='--', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig('outputs/Discretization_error_Low.pdf')
-    plt.show()
-    #%%
-    # Plot one example for 8 families of fibers
-    k = 4
-    projected_KL = project_discrete_to_grid_centered_bins(discretization[k][0], discretization[k][1], angles_Low)
-    plot_discrete_vs_continuous(f'Low_{k}', angles_Low, avg_Low_density, discretization[k][0], discretization[k][1], projected_KL)
-    
-    k = 8
-    projected_KL = project_discrete_to_grid_centered_bins(discretization[k][0], discretization[k][1], angles_Low)
-    plot_discrete_vs_continuous(f'Low_{k}', angles_Low, avg_Low_density, discretization[k][0], discretization[k][1], projected_KL)
-    
-    k = 14
-    projected_KL = project_discrete_to_grid_centered_bins(discretization[k][0], discretization[k][1], angles_Low)
-    plot_discrete_vs_continuous(f'Low_{k}', angles_Low, avg_Low_density, discretization[k][0], discretization[k][1], projected_KL)
+    continuous_angles = data['angle_deg']
+    continuous_pdf = data['pdf']
     
     
-    k = 20
-    projected_KL = project_discrete_to_grid_centered_bins(discretization[k][0], discretization[k][1], angles_Low)
-    plot_discrete_vs_continuous(f'Low_{k}', angles_Low, avg_Low_density, discretization[k][0], discretization[k][1], projected_KL)
-    
+    # re-center: circumferential (90 deg) -> theta = 0
+    # continuous_angles = continuous_angles - 90.0
 
-    k = 40
-    projected_KL = project_discrete_to_grid_centered_bins(discretization[k][0], discretization[k][1], angles_Low)
-    plot_discrete_vs_continuous(f'Low_{k}', angles_Low, avg_Low_density, discretization[k][0], discretization[k][1], projected_KL)
+    # switch density units from 1/rad to 1/deg
+    continuous_pdf = continuous_pdf * np.pi / 180.0
+
+    
+    folder_name = ''
+    name = 'media'
+    
+    continuous_cdf = build_CDF(continuous_angles, continuous_pdf, continuous_angles, integral_type='Trapezoidal')
+    
+    plot_PDF_CDF(continuous_pdf, continuous_cdf, continuous_angles, folder_name, name)
+    
+    N = 8
+    discrete_angles, discrete_weights = discretizing_distribution(continuous_angles, continuous_pdf, N)
+    discrete_cdf = build_CDF(discrete_angles, discrete_weights, continuous_angles)
+    
+    plot_CDF_discrete(discrete_cdf, continuous_cdf, continuous_angles, folder_name, name)
+    plot_PDF_discrete(discrete_weights, discrete_angles, continuous_pdf, continuous_angles, folder_name, name)
     

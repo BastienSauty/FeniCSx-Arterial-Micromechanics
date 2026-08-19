@@ -4,6 +4,9 @@ import sys
 
 from petsc4py.PETSc import ScalarType
 
+import time
+import resource
+
 
 from dolfinx import mesh, fem, plot, io
 import dolfinx.fem.petsc
@@ -49,6 +52,7 @@ from Multiscale_Framework.function_modules.auxiliary_functions import (
     local_basis,
     set_orientation_fields,
     change_of_base_matrix,
+    init_identity_field,
 )
 
 # Nonlinear functions
@@ -233,7 +237,7 @@ class Mechanical_Problem_axi:
         self.r = self.x[0]
         
         # Defining Integrals
-        self.metadata = {"quadrature_degree": 6}
+        self.metadata = {"quadrature_degree": 3}
         #self.ds = ufl.Measure('ds', domain=self.domain, metadata=metadata)
         self.dx = ufl.Measure("dx", domain=self.domain, metadata=self.metadata, subdomain_data=self.meshtags)
         
@@ -331,6 +335,156 @@ class Mechanical_Problem_axi:
                 mat.M.update_func()
             elif type(mat) is Active_MT_material:
                 mat.M.update_func()
+
+    ##########################################################################
+    # Persistent-problem helpers : build the mesh / spaces / weak form / solver
+    # ONCE, then reuse this same object across many solves (e.g. a calibration
+    # loop) via reset_state() + update_geometry()/update_subdomain_parameters()
+    # + solve_1_step(). None of these touch any UFL form or fem.Expression, so
+    # none of them can trigger an FFCx JIT recompilation.
+    ##########################################################################
+
+    def reset_state(self):
+        """
+        Reset the mechanical problem to its undeformed, unstressed reference
+        state (displacement, stress, deformation gradients, fiber orientations)
+        so it can be re-solved from scratch without rebuilding the mesh, weak
+        form or solver. Call this at the start of every solve when reusing a
+        persistent Mechanical_Problem_axi across many iterations.
+
+        /!\ This only resets the PRIMARY fields (Fn, taun, un, Sn...). Every
+        DERIVED per-inclusion/matrix quantity (young modulus field, axial
+        stretch, the microscopic stress increment expressions, the
+        Mori-Tanaka H2inv/M matrices...) is only ever recomputed as a side
+        effect of compute_increment() during the loading loop - so it still
+        holds whatever it was left at by the END of the previous solve
+        (including a partially-diverged one, since a failed Newton-Raphson
+        step still calls compute_increment() before non-convergence is
+        detected) until update_local_quantities() is called. The caller MUST
+        call update_local_quantities() itself, AFTER reset_state() and after
+        pushing any new parameter/geometry values (update_subdomain_parameters/
+        update_geometry) - not before, since those derived quantities should
+        reflect the NEW values, not the ones reset_state() just zeroed out to.
+        See main_ArterialTissue_persistent.py::solve_simulation for the
+        canonical ordering. Skipping this step is what silently corrupts the
+        first Newton-Raphson step of the NEXT solve after any step that came
+        close to diverging - looks like a bad choice of parameters, but is
+        really just stale state.
+        """
+        self.un.x.array[:] = 0.0
+        self.un.x.scatter_forward()
+        self.Sn.x.array[:] = 0.0
+        self.Sn.x.scatter_forward()
+        self.du.x.array[:] = 0.0
+        self.duj.x.array[:] = 0.0
+        self.dSint.x.array[:] = 0.0
+        self.delta_t.value = 0.
+        self.d_el_flag.value = 0.
+
+        for mat in self.subdomain.values():
+            mat.matrix.taun.x.array[:] = 0.0
+            mat.matrix.taun.x.scatter_forward()
+            init_identity_field(mat.matrix.Fn)
+            for incl in mat.inclusions.values():
+                incl.taun.x.array[:] = 0.0
+                incl.taun.x.scatter_forward()
+                init_identity_field(incl.Fn)
+                if hasattr(incl, "set_orientation"):
+                    # no args -> re-applies the currently stored theta/phi ;
+                    # update_micro_mech overwrites e_r/e_theta/e_phi with the
+                    # deformed orientation while solving, this restores the
+                    # reference orientation before the next solve.
+                    incl.set_orientation()
+
+    def init_radial_layering(self, ri0, re0, ri_adv0, nr):
+        """
+        Precompute, once at setup right after build_space_functions() and
+        BEFORE any subdomain/material is built, the fractional radial position
+        of every mesh geometry node within its layer (media: [ri0, ri_adv0],
+        adventitia: [ri_adv0, re0]). These fractions are purely topological -
+        they only depend on which of the nr uniform radial intervals created
+        by mesh.create_rectangle() a node originally fell into - and never
+        change again. update_geometry() reuses them to place the
+        media/adventitia interface at the EXACT target ri_adv on every call,
+        instead of snapping to the nearest pre-existing element boundary (the
+        previous "closest element" approach).
+
+        This call also immediately warps the freshly-created uniform mesh so
+        the interface sits exactly at ri_adv0 already, before cells_adv/
+        cells_media are classified via mesh.locate_entities() right after -
+        so the classification is exact from the very first call, not just on
+        later updates.
+
+        The only topological choice made here - and the only one made ONCE,
+        forever - is how many of the nr total radial elements are allocated
+        to the media layer (self.nmed, rounded from the initial nominal
+        split). Any subsequent (ri, re, ri_adv) that keeps roughly the same
+        media/adventitia proportion is represented exactly ; only a
+        target split radically different from the initial one would benefit
+        from a different nmed, which would require a fresh setup_simulation()
+        call (this is a mesh-quality choice, not a validity requirement -
+        update_geometry() itself never fails, unlike the previous approach).
+
+        Parameters
+        ----------
+        ri0, re0, ri_adv0 : nominal geometry used to build the mesh
+        nr : total number of radial elements (fixed forever)
+        """
+        x = self.domain.geometry.x
+        r0 = x[:, 0].copy()  # uniform radial coordinates as created by mesh.create_rectangle
+        frac_global = (r0 - ri0) / (re0 - ri0)  # in [0, 1], purely topological
+
+        split_frac = (ri_adv0 - ri0) / (re0 - ri0)
+        nmed = int(round(split_frac * nr))
+        nmed = max(1, min(nr - 1, nmed))  # keep both layers non-degenerate
+        split_frac_snapped = nmed / nr
+
+        self.nmed = nmed
+        self._media_mask = frac_global <= split_frac_snapped + 1e-9
+        self._frac_media = frac_global[self._media_mask] / split_frac_snapped
+        self._frac_adv = (frac_global[~self._media_mask] - split_frac_snapped) / (1 - split_frac_snapped)
+
+        # Warp immediately so the mesh already has the EXACT ri_adv0 interface
+        # (rather than the nearest of the nr uniform element boundaries)
+        # before cells_adv/cells_media are classified.
+        self.update_geometry(ri0, re0, ri_adv0)
+
+    def update_geometry(self, ri_new, re_new, ri_adv_new):
+        """
+        Piecewise-affine radial remap that places the media/adventitia
+        interface EXACTLY at r = ri_adv_new (never approximated to the
+        nearest element boundary), while exactly conserving both the total
+        tissue area pi*(re_new**2 - ri_new**2) and the adventitia area
+        fraction (through ri_adv_new, computed by the caller from area/advTF -
+        see solve_simulation) - for ANY (ri_new, re_new, ri_adv_new), no
+        restriction, unlike the previous nmed-invariance-guarded version.
+
+        Nodes originally in the media layer (see init_radial_layering) are
+        remapped uniformly onto [ri_new, ri_adv_new] ; nodes originally in the
+        adventitia layer are remapped uniformly onto [ri_adv_new, re_new].
+        Only coordinate VALUES change - mesh topology, dof numbering,
+        boundary facets, meshtags and the compiled weak form are all
+        untouched (they never depended on the coordinate values in the first
+        place), so this never triggers a recompilation.
+
+        Must be called after init_radial_layering() has run once (at setup).
+        """
+        x = self.domain.geometry.x
+        x[self._media_mask, 0] = ri_new + self._frac_media * (ri_adv_new - ri_new)
+        x[~self._media_mask, 0] = ri_adv_new + self._frac_adv * (re_new - ri_adv_new)
+
+    def update_subdomain_parameters(self, name, card):
+        """
+        Push new physical parameter values into subdomain `name`, in place, no
+        recompilation. `card` follows the shape expected by
+        Homogenized_MT_material.update_parameters (a possibly partial dict
+        shaped like the json card used to build the subdomain at setup time).
+        `name` must already exist in self.subdomain (created once by
+        add_subdomain() during setup).
+        """
+        self.subdomain[name].update_parameters(card)
+
+    ##########################################################################
 
     def compute_increment(self):
         """
@@ -668,7 +822,7 @@ class Mechanical_Problem_3D:
         self.x = ufl.SpatialCoordinate(self.domain)
         
         # Defining Integrals
-        self.metadata = {"quadrature_degree": 6}
+        self.metadata = {"quadrature_degree": 3}
         #self.ds = ufl.Measure('ds', domain=self.domain, metadata=metadata)
         self.dx = ufl.Measure("dx", domain=self.domain, metadata=self.metadata, subdomain_data=self.meshtags)
         
@@ -767,6 +921,80 @@ class Mechanical_Problem_3D:
             elif type(mat) is Active_MT_material:
                 mat.M.update_func()
 
+
+    ##########################################################################
+    # Persistent-problem helpers : build the mesh / spaces / weak form / solver
+    # ONCE, then reuse this same object across many solves (e.g. a calibration
+    # loop) via reset_state() + update_geometry()/update_subdomain_parameters()
+    # + solve_1_step(). None of these touch any UFL form or fem.Expression, so
+    # none of them can trigger an FFCx JIT recompilation.
+    ##########################################################################
+
+    def reset_state(self):
+        """
+        Reset the mechanical problem to its undeformed, unstressed reference
+        state (displacement, stress, deformation gradients, fiber orientations)
+        so it can be re-solved from scratch without rebuilding the mesh, weak
+        form or solver. Call this at the start of every solve when reusing a
+        persistent Mechanical_Problem_axi across many iterations.
+
+        /!\ This only resets the PRIMARY fields (Fn, taun, un, Sn...). Every
+        DERIVED per-inclusion/matrix quantity (young modulus field, axial
+        stretch, the microscopic stress increment expressions, the
+        Mori-Tanaka H2inv/M matrices...) is only ever recomputed as a side
+        effect of compute_increment() during the loading loop - so it still
+        holds whatever it was left at by the END of the previous solve
+        (including a partially-diverged one, since a failed Newton-Raphson
+        step still calls compute_increment() before non-convergence is
+        detected) until update_local_quantities() is called. The caller MUST
+        call update_local_quantities() itself, AFTER reset_state() and after
+        pushing any new parameter/geometry values (update_subdomain_parameters/
+        update_geometry) - not before, since those derived quantities should
+        reflect the NEW values, not the ones reset_state() just zeroed out to.
+        See main_ArterialTissue_persistent.py::solve_simulation for the
+        canonical ordering. Skipping this step is what silently corrupts the
+        first Newton-Raphson step of the NEXT solve after any step that came
+        close to diverging - looks like a bad choice of parameters, but is
+        really just stale state.
+        """
+        self.un.x.array[:] = 0.0
+        self.un.x.scatter_forward()
+        self.Sn.x.array[:] = 0.0
+        self.Sn.x.scatter_forward()
+        self.du.x.array[:] = 0.0
+        self.duj.x.array[:] = 0.0
+        self.dSint.x.array[:] = 0.0
+        self.delta_t.value = 0.
+        self.d_el_flag.value = 0.
+
+        for mat in self.subdomain.values():
+            mat.matrix.taun.x.array[:] = 0.0
+            mat.matrix.taun.x.scatter_forward()
+            init_identity_field(mat.matrix.Fn)
+            for incl in mat.inclusions.values():
+                incl.taun.x.array[:] = 0.0
+                incl.taun.x.scatter_forward()
+                init_identity_field(incl.Fn)
+                if hasattr(incl, "set_orientation"):
+                    # no args -> re-applies the currently stored theta/phi ;
+                    # update_micro_mech overwrites e_r/e_theta/e_phi with the
+                    # deformed orientation while solving, this restores the
+                    # reference orientation before the next solve.
+                    incl.set_orientation()
+                    
+
+    def update_subdomain_parameters(self, name, card):
+        """
+        Push new physical parameter values into subdomain `name`, in place, no
+        recompilation. `card` follows the shape expected by
+        Homogenized_MT_material.update_parameters (a possibly partial dict
+        shaped like the json card used to build the subdomain at setup time).
+        `name` must already exist in self.subdomain (created once by
+        add_subdomain() during setup).
+        """
+        self.subdomain[name].update_parameters(card)
+        
+    ##########################################################################
 
     def compute_increment(self):
         """

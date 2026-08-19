@@ -8,13 +8,11 @@ from .class_modules.load_class import Artery_load
 # --- function modules ---
 from .function_modules.auxiliary_functions import Tensor2Voigt, Voigt2Tensor
 
-from .function_modules.discretization_collagen import (
+from Multiscale_Framework.function_modules.discretization_collagen import  (
     discretizing_distribution,
-    plot_discrete_vs_continuous,
-    load_continuous_distribution,
-    project_discrete_to_grid_centered_bins,
-    RMSE_L2,
-    normalized_moment_error,
+    plot_PDF_discrete,
+    build_CDF,
+    plot_CDF_discrete
 )
 
 __all__ = [
@@ -22,5 +20,9 @@ __all__ = [
     "Results",
     "Artery_load",
     "Tensor2Voigt",
-    "Voigt2Tensor"
+    "Voigt2Tensor",
+    "discretizing_distribution",
+    "plot_PDF_discrete", 
+    "build_CDF",
+    "plot_CDF_discrete"
 ]

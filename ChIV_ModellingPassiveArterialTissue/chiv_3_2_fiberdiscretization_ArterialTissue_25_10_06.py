@@ -26,10 +26,12 @@ from matplotlib.lines import Line2D
 mpl.rcParams['text.usetex'] = True
 
 plt.rcParams.update({
-    "text.usetex": True,          # use LaTeX for all text
-    "font.family": "serif",       # LaTeX default serif font
-    "font.serif": ["Computer Modern"],  # optional, match LaTeX
-    "axes.labelsize": 10,         # adjust label size
+    "text.usetex": True,
+    # Inject Latin Modern and T1 font encoding into the LaTeX preamble
+    "text.latex.preamble": r"\usepackage[T1]{fontenc} \usepackage{lmodern}",
+    "font.family": "serif",
+    "font.serif": ["Latin Modern Roman"], # Matches your thesis main text
+    "axes.labelsize": 10,
     "xtick.labelsize": 9,
     "ytick.labelsize": 9,
     "legend.fontsize": 9
@@ -43,7 +45,7 @@ os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 from Multiscale_Framework.class_modules.load_class import Artery_load
 
-from Multiscale_Framework.function_modules.discretization_collagen import discretizing_distribution, plot_discrete_vs_continuous, project_discrete_to_grid_centered_bins, RMSE_L2, normalized_moment_error
+from Multiscale_Framework.function_modules.discretization_collagen import load_and_discretize_distribution, plot_discrete_vs_continuous, project_discrete_to_grid_centered_bins, RMSE_L2, normalized_moment_error
 
 
 def load_JSON(card_name):
@@ -98,7 +100,7 @@ def pipeline_SA(N, name, folder_name, simu_card, media_card, adventitia_card):
     
     # Discretization
     filename_exp_collagen_distrib = 'ChIV_ModellingPassiveArterialTissue/passive_calibration/avg_density_Low.npz'
-    theta_coll_adv, weights_coll_adv = discretizing_distribution(filename_exp_collagen_distrib, N, f'{name}_{N}_init', folder_name, plot=True, verbose=False) # function in discretization_collagen.py
+    theta_coll_adv, weights_coll_adv = load_and_discretize_distribution(filename_exp_collagen_distrib, N, f'{name}_{N}_init', folder_name, plot=True, verbose=False) # function in discretization_collagen.py
     f_tot = 0.5
     weights_coll_adv *= f_tot
     

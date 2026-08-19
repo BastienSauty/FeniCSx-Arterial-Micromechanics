@@ -1,0 +1,5 @@
+{
+  "cffi_extra_compile_args": [
+    "-O0"
+  ]
+}

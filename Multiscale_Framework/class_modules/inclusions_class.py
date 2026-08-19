@@ -5,7 +5,7 @@ import sys
 
 # Parameter classes
 from Multiscale_Framework.class_modules.parameter_class import (
-    cst_param,
+    cst_scalar,
     nn_cst_young_modulus,
     inverse_matrix6_6,
     matrix_volumic_frac,
@@ -96,8 +96,8 @@ class Matrix:
         """
         self.inel = False # flag for inelastic behavior
         domain = geom['domain']
-        self.E = fem.Constant(domain, np.float64(mat["young"]))
-        self.nu = fem.Constant(domain, np.float64(mat["poisson"]))
+        self.E = cst_scalar(mat["young"], geom['scalar spacefunction'])
+        self.nu = cst_scalar(mat["poisson"], geom['scalar spacefunction'])
         self.V_vec = geom["vector spacefunction"]
         self.V_stiff = geom["stiff spacefunction"]
         self.V_mandel = geom["mandel spacefunction"]
@@ -106,9 +106,9 @@ class Matrix:
         self.obj_der = geom["objective derivative"] # Jaumann
         self.f = matrix_volumic_frac(geom['scalar spacefunction'], geom['cells']) # volumic fraction may or not be homogenous; special class
         
-        self.mu = self.E/(2*(1+self.nu))
-        self.lambda_ = self.E*self.nu/(1+self.nu)/(1-2*self.nu)
-        self.k = self.E/(3*(1-2*self.nu))
+        self.mu = self.E[0]/(2*(1+self.nu[0]))
+        self.lambda_ = self.E[0]*self.nu[0]/(1+self.nu[0])/(1-2*self.nu[0])
+        self.k = self.E[0]/(3*(1-2*self.nu[0]))
         
         self.taun = fem.Function(self.V_mandel)
         
@@ -120,6 +120,21 @@ class Matrix:
         self.C = 2*self.mu*K_m + 3*self.k*J_m
         self.S = 1/(2*self.mu)*K_m + 1/(3*self.k)*J_m
     
+    def set_parameters(self, mat):
+        """
+        Push new values for the matrix's physical parameters, in place, without
+        rebuilding any form (no recompilation). mat is a (possibly partial) dict
+        shaped like the json card's "matrix" entry, e.g. {"young": 0.06} or
+        {"young": 0.06, "poisson": 0.44}.
+        self.mu, self.lambda_, self.k, self.C, self.S remain valid automatically:
+        they are ufl expressions built from self.E/self.nu, so they pick up the
+        new values at the next assembly without needing to be rebuilt.
+        """
+        if "young" in mat:
+            self.E.set_value(mat["young"])
+        if "poisson" in mat:
+            self.nu.set_value(mat["poisson"])
+
     def localization_tensors(self, M):
         """
         create in place A_m the localization tensor that estimates the strain in the matrix, from tensor M.
@@ -240,8 +255,8 @@ class Spherical_inclusion:
         # Inclusion properties
         domain = geom['domain']
         self.nu = fem.Constant(domain, np.float64(mat["poisson"]))
-        self.f = cst_param(mat["volumic_fraction"], geom['scalar spacefunction']) # scalar field with constant value
-        self.E = cst_param(mat["young"], geom['scalar spacefunction'])
+        self.f = cst_scalar(mat["volumic_fraction"], geom['scalar spacefunction']) # scalar field with constant value
+        self.E = cst_scalar(mat["young"], geom['scalar spacefunction'])
         
         self.V_stiff = geom["stiff spacefunction"]
         self.V_mandel = geom["mandel spacefunction"]
@@ -249,8 +264,11 @@ class Spherical_inclusion:
         self.cells = geom["cells"]
         self.obj_der = geom["objective derivative"]
         
-        self.mu_0 = fem.Constant(domain, np.float64(mat["mu_0"])) # matrix values, used in localization
-        self.k_0 = fem.Constant(domain, np.float64(mat["k_0"]))
+        # numeric snapshot (plain float), see material_class.py module docstring
+        # - required because eshelby_aux_spheroid() runs a genuine numerical
+        # integration (scipy.integrate.quad) incompatible with a symbolic value
+        self.mu_0 = cst_scalar(mat["mu_0"], geom['scalar spacefunction']) # matrix values, used in localization
+        self.k_0 = cst_scalar(mat["k_0"], geom['scalar spacefunction'])
         
         self.mu = self.E.func[0]/(2*(1+self.nu))
         self.lambda_ = self.E.func[0]*self.nu/(1+self.nu)/(1-2*self.nu)
@@ -280,11 +298,11 @@ class Spherical_inclusion:
         To reduce inverse computation, based on the decomposition in the projectors base 
         """
         # _isoproj = {3*k, 2*mu} -> 3*k*J_m + 2*mu*K_m with J_m the trace projector and K_m the deviatoric projector 
-        Cm_isoproj = np.array([3*self.k_0, 2*self.mu_0])
+        Cm_isoproj = np.array([3*self.k_0[0], 2*self.mu_0[0]])
         Cp_isoproj = np.array([3*self.k, 2*self.mu])
     
         # P Hill tensor here is defined for a spherical inclusion
-        Ppinv_isoproj = np.array([3*self.k_0+4*self.mu_0, 5*self.mu_0*(3*self.k_0+4*self.mu_0)/(3*(self.k_0 + 2*self.mu_0))])
+        Ppinv_isoproj = np.array([3*self.k_0[0]+4*self.mu_0[0], 5*self.mu_0[0]*(3*self.k_0[0]+4*self.mu_0[0])/(3*(self.k_0[0] + 2*self.mu_0[0]))])
         Cstar_isoproj = Ppinv_isoproj - Cm_isoproj
 
         A_isoproj = np.reciprocal(Cstar_isoproj + Cp_isoproj)*(Cstar_isoproj + Cm_isoproj) # inverse and multiplications are made element wise in the 2 component array
@@ -344,6 +362,20 @@ class Spherical_inclusion:
         
         
         
+    def set_parameters(self, mat):
+        """
+        Push new values for this inclusion's young modulus and volumic
+        fraction, in place, without rebuilding any form (no recompilation).
+        mat is a (possibly partial) dict shaped like the corresponding json
+        card entry. Poisson ratio is NOT covered here (kept as a plain
+        fem.Constant on this class, not yet migrated to cst_scalar) - update
+        it by rebuilding via setup_simulation() if it needs to change.
+        """
+        if "young" in mat:
+            self.E.set_value(mat["young"])
+        if "volumic_fraction" in mat:
+            self.f.set_value(mat["volumic_fraction"])
+
     def update_micro_mech(self):
         """
         update micro mechanics in inclusion for an increment of duj macro displacement field : deformation gradient Fn and kirchhoff stress taun
@@ -419,8 +451,8 @@ class Active_Spherical_inclusion:
         # Inclusion properties
         domain = geom['domain']
         self.nu = fem.Constant(domain, np.float64(mat["poisson"]))
-        self.f = cst_param(mat["volumic_fraction"], geom['scalar spacefunction']) # scalar field with constant value
-        self.E = cst_param(mat["young"], geom['scalar spacefunction'])
+        self.f = cst_scalar(mat["volumic_fraction"], geom['scalar spacefunction']) # scalar field with constant value
+        self.E = cst_scalar(mat["young"], geom['scalar spacefunction'])
         
         self.V_stiff = geom["stiff spacefunction"]
         self.V_mandel = geom["mandel spacefunction"]
@@ -440,8 +472,11 @@ class Active_Spherical_inclusion:
             self.t_c = fem.Constant(domain, np.float64(mat["characteristic time"])) # caracteristic time
             
         
-        self.mu_0 = fem.Constant(domain, np.float64(mat["mu_0"])) # matrix values, used in localization
-        self.k_0 = fem.Constant(domain, np.float64(mat["k_0"]))
+        # numeric snapshot (plain float), see material_class.py module docstring
+        # - required because eshelby_aux_spheroid() runs a genuine numerical
+        # integration (scipy.integrate.quad) incompatible with a symbolic value
+        self.mu_0 = cst_scalar(mat["mu_0"], geom['scalar spacefunction']) # matrix values, used in localization
+        self.k_0 = cst_scalar(mat["k_0"], geom['scalar spacefunction'])
         
         self.mu = self.E.func[0]/(2*(1+self.nu))
         self.lambda_ = self.E.func[0]*self.nu/(1+self.nu)/(1-2*self.nu)
@@ -483,11 +518,11 @@ class Active_Spherical_inclusion:
         To reduce inverse computation, based on the decomposition in the projectors base 
         """
         # _isoproj = {3*k, 2*mu} -> 3*k*J_m + 2*mu*K_m with J_m the trace projector and K_m the deviatoric projector 
-        Cm_isoproj = np.array([3*self.k_0, 2*self.mu_0])
+        Cm_isoproj = np.array([3*self.k_0[0], 2*self.mu_0[0]])
         Cp_isoproj = np.array([3*self.k, 2*self.mu])
     
         # P Hill tensor here is defined for a spherical inclusion
-        Ppinv_isoproj = np.array([3*self.k_0+4*self.mu_0, 5*self.mu_0*(3*self.k_0+4*self.mu_0)/(3*(self.k_0 + 2*self.mu_0))])
+        Ppinv_isoproj = np.array([3*self.k_0[0]+4*self.mu_0[0], 5*self.mu_0[0]*(3*self.k_0[0]+4*self.mu_0[0])/(3*(self.k_0[0] + 2*self.mu_0[0]))])
         Cstar_isoproj = Ppinv_isoproj - Cm_isoproj
         
         # Hill tensor
@@ -553,8 +588,10 @@ class Active_Spherical_inclusion:
             delta_t : increment of time for inelastic components.
         New attributes created here :
             dtau_dirder, dtau_incr : stress rate in direction du, and incremental counterpart. The first one is used in the Newton Raphson linearization, the second in computing the increment.
-            dtau_expr, dF_expr : fenicsx expression that computes respectively the increment of stress and the increment of deformation gradient in the matrix in the whole domain.
-            dF_inel_expr : fenicsx expression that computes the increment of inelastic deformation gradient.
+            dtau_expr : fenicsx expression that computes the increment of stress in the matrix in the whole domain.
+            dF_bundle_expr : fenicsx expression that computes, bundled into a single (3,6) expression to
+                cut compile count, the increment of deformation gradient (cols 0:3) and inelastic
+                deformation gradient (cols 3:6). Split into dF/dF_inel numerically in update_micro_mech.
         """
         self.dtau = fem.Function(self.V_mandel)
         self.dF = fem.Function(self.V_mat)
@@ -578,13 +615,41 @@ class Active_Spherical_inclusion:
 
         # Stress and Strain increment expressions
         self.dtau_expr = fem.Expression(self.dtau_incr, self.V_mandel.element.interpolation_points()) # local increment of stress
-        self.dF_expr = fem.Expression(ufl.dot(self.d_incr, self.Fn), self.V_mat.element.interpolation_points()) 
-        
-        # Manage inelastic increments
-        self.dF_inel_expr = fem.Expression(delta_t*self.F_dot_inel, self.V_mat.element.interpolation_points()) 
+
+        # dF_expr and dF_inel_expr both target V_mat (3,3) - bundled into ONE
+        # fem.Expression (a (3,6) matrix: cols 0:3 = dF, cols 3:6 = dF_inel) so
+        # that JIT-compiling this inclusion costs 1 compile here instead of 2.
+        # Split back into the separate dF/dF_inel Functions numerically in
+        # update_micro_mech - no change to the underlying math.
+        dF_form = ufl.dot(self.d_incr, self.Fn)
+        dF_inel_form = delta_t*self.F_dot_inel
+        self.V_mat_bundle2 = fem.functionspace(self.V_mat.mesh, ("DG", 0, (3, 6)))
+        self.dF_bundle_expr = fem.Expression(
+            ufl.as_matrix([
+                [dF_form[0, 0], dF_form[0, 1], dF_form[0, 2], dF_inel_form[0, 0], dF_inel_form[0, 1], dF_inel_form[0, 2]],
+                [dF_form[1, 0], dF_form[1, 1], dF_form[1, 2], dF_inel_form[1, 0], dF_inel_form[1, 1], dF_inel_form[1, 2]],
+                [dF_form[2, 0], dF_form[2, 1], dF_form[2, 2], dF_inel_form[2, 0], dF_inel_form[2, 1], dF_inel_form[2, 2]],
+            ]),
+            self.V_mat_bundle2.element.interpolation_points(),
+        )
+        self.dF_bundle_t = fem.Function(self.V_mat_bundle2)
         self.delta_t = delta_t
-        
-        
+
+
+    def set_parameters(self, mat):
+        """
+        Push new values for this inclusion's young modulus and volumic
+        fraction, in place, without rebuilding any form (no recompilation).
+        mat is a (possibly partial) dict shaped like the corresponding json
+        card entry. Poisson ratio is NOT covered here (kept as a plain
+        fem.Constant on this class, not yet migrated to cst_scalar) - update
+        it by rebuilding via setup_simulation() if it needs to change.
+        """
+        if "young" in mat:
+            self.E.set_value(mat["young"])
+        if "volumic_fraction" in mat:
+            self.f.set_value(mat["volumic_fraction"])
+
     def update_micro_mech(self):
         """
         update micro mechanics in inclusion for an increment of duj macro displacement field : deformation gradient Fn and kirchhoff stress taun
@@ -593,13 +658,23 @@ class Active_Spherical_inclusion:
         self.taun.x.array[:] += self.dtau.x.array[:] # update cauchy stresses in inclusions
         self.dtau.x.scatter_forward()
         self.taun.x.scatter_forward()
-                
-        # compute increment of strain
-        self.dF.interpolate(self.dF_expr, self.cells)
+
+        # compute increment of strain - single combined interpolation, then
+        # split numerically (same pattern as inverse_matrix6_6.update_func())
+        self.dF_bundle_t.interpolate(self.dF_bundle_expr, self.cells)
+        self.dF_bundle_t.x.scatter_forward()
+
+        nb_elem = len(self.dF_bundle_t.x.array)//18
+        bundle_field = self.dF_bundle_t.x.array.reshape(nb_elem, 3, 6)
+        dF_field = np.zeros((nb_elem, 3, 3))
+        dF_inel_field = np.zeros((nb_elem, 3, 3))
+        dF_field[self.cells, :, :] = bundle_field[self.cells, :, 0:3]
+        dF_inel_field[self.cells, :, :] = bundle_field[self.cells, :, 3:6]
+        self.dF.x.array[:] = dF_field.reshape(nb_elem*9)
+        self.dF_inel.x.array[:] = dF_inel_field.reshape(nb_elem*9)
         self.dF.x.scatter_forward()
-        self.dF_inel.interpolate(self.dF_inel_expr, self.cells)
         self.dF_inel.x.scatter_forward()
-        
+
         # update strain deformation gradients
         self.Fn.x.array[:] += self.dF.x.array[:] # store total strain
         self.Fn.x.scatter_forward()   
@@ -672,11 +747,11 @@ class Spheroidal_inclusion:
         self.inel = False # flag for inelastic behavior
         self.type = mat["type"]
         domain = geom['domain']
-        self.nu = fem.Constant(domain, np.float64(mat["poisson"]))
+        self.nu = cst_scalar(mat["poisson"], geom['scalar spacefunction'])
         
         # Volumic Fraction
         if (type(mat["volumic_fraction"]) is float) or (type(mat["volumic_fraction"]) is np.float64):
-            self.f = cst_param(mat["volumic_fraction"], geom['scalar spacefunction'])
+            self.f = cst_scalar(mat["volumic_fraction"], geom['scalar spacefunction'])
         elif (type(mat["volumic_fraction"]) is list or type(mat["volumic_fraction"]) is np.ndarray): #--> in case of non constant volume fraction
             self.f = nn_uniform_param(mat["volumic_fraction"], geom['scalar spacefunction'], geom['cells']) 
         else:
@@ -684,25 +759,26 @@ class Spheroidal_inclusion:
 
         # Young Modulus properties
         if mat["young_type"]=="Constant":
-            self.E = cst_param(mat["young"], geom['scalar spacefunction'])
+            self.E = cst_scalar(mat["young"], geom['scalar spacefunction'])
         elif mat["young_type"]=="Exponential" or mat["young_type"]=="Plateau-Ramp-Plateau":
             self.E = nn_cst_young_modulus(mat["young_type"], mat["young"], geom['scalar spacefunction'], geom['domain'], geom['cells'])
         else:
             raise Exception('wrong type for Young Modulus. Please specify "young_type": as either "Constant", "Plateau-Ramp-Plateau" or "Exponential"') 
 
-        self.mu = self.E.func[0]/(2*(1+self.nu))
-        self.k = self.E.func[0]/(3*(1-2*self.nu))
+        self.mu = self.E.func[0]/(2*(1+self.nu[0]))
+        self.k = self.E.func[0]/(3*(1-2*self.nu[0]))
         
         # Reference mechanical properties (matrix)
-        self.mu_0 = fem.Constant(domain, np.float64(mat["mu_0"]))
-        self.k_0 = fem.Constant(domain, np.float64(mat["k_0"]))
+        # numeric snapshot (plain float), see material_class.py module docstring
+        self.mu_0 = cst_scalar(mat["mu_0"], geom['scalar spacefunction'])
+        self.k_0 = cst_scalar(mat["k_0"], geom['scalar spacefunction'])
         
-        # Cylinder orientation
+        # Cylinder orientation (kept in radians ; degrees stored too for convenience)
         self.theta = np.pi/180*mat["theta"]
         self.phi = np.pi/180*mat["phi"]
         # spheroid shape ratio
         if self.type=="prolate_spheroid":
-            self.shape_ratio = fem.Constant(domain, np.float64(mat["shape_ratio"]))
+            self.shape_ratio = cst_scalar(mat["shape_ratio"], geom['scalar spacefunction'])
         
         # Space functions 
         self.V_vec = geom["vector spacefunction"] # specifically used for cylinder and oblate spheroids, hence in the mat dictionnary
@@ -763,12 +839,20 @@ class Spheroidal_inclusion:
         """
         called by : spheroidal_inclusion.__init__
         Solution of the eshelby problem for a cylinder aligned with the third vector of the local basis : [e_theta, e_phi, e_r]. Based on shape of inclusion and stiffness matrix of reference C0
+
+        nu_0 (and shape_ratio, for the spheroid case) MUST be plain python
+        floats here : eshelby_aux_spheroid() runs a genuine scipy.integrate.quad
+        numerical integration, which cannot accept a symbolic UFL value - so
+        we read .value (the numeric snapshot side of cst_scalar) rather than
+        indexing mu_0/k_0/shape_ratio as UFL Constants ([0]). See
+        material_class.py's module docstring for why mu_0/k_0 are numeric
+        snapshots in the first place.
         """
-        nu_0 = (3*self.k_0 - 2*self.mu_0)/(2*(3*self.k_0 + self.mu_0))
+        nu_0 = (3*self.k_0.value - 2*self.mu_0.value)/(2*(3*self.k_0.value + self.mu_0.value))
         if self.type == 'cylinder':
             self.L = ufl.as_tensor(eshelby_aux_cylindrical(nu_0))
         elif self.type == 'prolate_spheroid':
-            self.L = ufl.as_tensor(eshelby_aux_spheroid(nu_0, self.shape_ratio))
+            self.L = ufl.as_tensor(eshelby_aux_spheroid(nu_0, self.shape_ratio.value))
             
         i, j, k, l = ufl.indices(4)
         
@@ -786,8 +870,8 @@ class Spheroidal_inclusion:
         Notations used are the ones from ZAMM paper Morin2018
         """
         J,K,I = projection_tensors()
-        C0 = 2*self.mu_0*ufl.as_matrix(K) + 3*self.k_0*ufl.as_matrix(J)
-        C0inv = 1/(2*self.mu_0)*ufl.as_matrix(K) + 1/(3*self.k_0)*ufl.as_matrix(J)
+        C0 = 2*self.mu_0[0]*ufl.as_matrix(K) + 3*self.k_0[0]*ufl.as_matrix(J)
+        C0inv = 1/(2*self.mu_0[0])*ufl.as_matrix(K) + 1/(3*self.k_0[0])*ufl.as_matrix(J)
         
         self.P = ufl.dot(self.S_esh, C0inv) # Symmetric Mandel notation 6*6 tensors
         # A_inf is a matrix build on its inverse expression. Needs to be called with A_inf.func
@@ -795,6 +879,47 @@ class Spheroidal_inclusion:
         # (Ci-Cm):A_inf is symmetric 
         self.R_inf = - tensordot_4_4(self.R_esh, expand(ufl.dot(ufl.dot(C0inv, self.A_inf.func), self.C-C0))) # TENSOR 3*3*3*3 ; first skew sym
         
+    def set_orientation(self, theta=None, phi=None):
+        """
+        Update fiber/inclusion orientation in place (degrees), no recompilation :
+        only refills the e_r/e_theta/e_phi Function fields numerically. Every
+        downstream form (Eshelby tensor S_esh/R_esh, localization tensor A_inf...)
+        is built symbolically from these Function objects (self.Pass), not from
+        theta/phi directly, so it stays valid for any new orientation without
+        being rebuilt.
+        Called with no arguments, it just re-applies the currently stored
+        self.theta/self.phi - used by reset_state() to restore the reference
+        orientation before a fresh solve (update_micro_mech overwrites
+        e_r/e_theta/e_phi incrementally with the deformed orientation while
+        solving).
+        """
+        if theta is not None:
+            self.theta = np.pi/180*theta
+        if phi is not None:
+            self.phi = np.pi/180*phi
+        [e_theta_vec, e_phi_vec, e_r_vec] = local_basis(self.theta, self.phi)
+        set_orientation_fields(self.e_theta, self.e_phi, self.e_r, e_theta_vec, e_phi_vec, e_r_vec)
+
+    def set_parameters(self, mat):
+        """
+        Push new values for this inclusion's physical parameters, in place,
+        without rebuilding any form (no recompilation). mat is a (possibly
+        partial) dict shaped like the corresponding json card entry, e.g.
+        {"young": [[0.4],[2.0],[1.1]]}, {"poisson": 0.3},
+        {"volumic_fraction": 0.05}, {"theta": 12.0, "phi": 90}, {"shape_ratio": 0.2}.
+        Keys not present in mat are left untouched.
+        """
+        if "young" in mat:
+            self.E.set_value(mat["young"])
+        if "poisson" in mat:
+            self.nu.set_value(mat["poisson"])
+        if "volumic_fraction" in mat:
+            self.f.set_value(mat["volumic_fraction"])
+        if ("theta" in mat) or ("phi" in mat):
+            self.set_orientation(mat.get("theta"), mat.get("phi"))
+        if "shape_ratio" in mat and hasattr(self, "shape_ratio"):
+            self.shape_ratio.set_value(mat["shape_ratio"])
+
     def localization_tensors(self, M):
         """
         called by : Homogenized_material.homogenization_scheme
@@ -825,7 +950,9 @@ class Spheroidal_inclusion:
         New attributes created here :
             dtau_dirder, dtau_incr : stress rate in direction du, and incremental counterpart. The first one is used in the Newton Raphson linearization, the second in computing the increment.
             dtau_expr, dF_expr : fenicsx expression that computes respectively the increment of stress and the increment of deformation gradient in the matrix in the whole domain.
-            e_r_expr, e_theta_expr, e_phi_expr : fenicsx expression that computes the new orientation fields.
+            frame_expr : fenicsx expression that computes the new e_r/e_theta/e_phi orientation vectors,
+                bundled into a single (3,3) expression (rows) to cut compile count. Split into
+                e_r_t/e_theta_t/e_phi_t numerically in update_micro_mech.
             lambda_er_expr : fenicsx expression that computes the stretch measure used in non-constant young modulus
         """
         self.dtau = fem.Function(self.V_mandel)
@@ -861,40 +988,56 @@ class Spheroidal_inclusion:
         
         # Stress and Strain increment expressions
         self.dtau_expr = fem.Expression(self.dtau_incr, self.V_mandel.element.interpolation_points()) # local increment of stress
-        self.dF_expr = fem.Expression(ufl.dot((self.d_incr + self.w_incr), self.Fn), self.V_mat.element.interpolation_points()) 
-        
+        self.dF_expr = fem.Expression(ufl.dot((self.d_incr + self.w_incr), self.Fn), self.V_mat.element.interpolation_points())
+
         # Orientation vectors
-    
+
         e_r_ = ufl.dot(ufl.as_matrix(np.eye(3)) + self.d_incr + self.w_incr, self.e_r)
         e_theta_temp = ufl.dot(ufl.as_matrix(np.eye(3)) + self.d_incr + self.w_incr, self.e_theta)
-    
-        self.e_r_expr = fem.Expression(e_r_ / ufl.sqrt(ufl.dot(e_r_, e_r_)), self.V_vec.element.interpolation_points())
-        
+
+        e_r_n = e_r_ / ufl.sqrt(ufl.dot(e_r_, e_r_))
+
         e_theta_ = e_theta_temp - ufl.dot(e_theta_temp, e_r_)*e_r_
-        self.e_theta_expr = fem.Expression(e_theta_ / ufl.sqrt(ufl.dot(e_theta_, e_theta_)), self.V_vec.element.interpolation_points())
-        
+        e_theta_n = e_theta_ / ufl.sqrt(ufl.dot(e_theta_, e_theta_))
+
         e_phi_ = ufl.cross(e_r_, e_theta_)
-        self.e_phi_expr = fem.Expression(e_phi_ / ufl.sqrt(ufl.dot(e_phi_, e_phi_)), self.V_vec.element.interpolation_points())
-        
+        e_phi_n = e_phi_ / ufl.sqrt(ufl.dot(e_phi_, e_phi_))
+
+        # e_r_expr/e_theta_expr/e_phi_expr all target V_vec (3,) and only depend
+        # on the PRE-update self.e_r/self.e_theta - bundled into ONE (3,3)
+        # fem.Expression (rows = e_r, e_theta, e_phi) reusing V_mat's interpolation
+        # points (identical DG0 points to V_vec, just a different block shape), so
+        # this costs 1 compile here instead of 3. Split back into e_r_t/e_theta_t/
+        # e_phi_t numerically in update_micro_mech - no change to the underlying math.
+        self.frame_expr = fem.Expression(
+            ufl.as_matrix([
+                [e_r_n[0], e_r_n[1], e_r_n[2]],
+                [e_theta_n[0], e_theta_n[1], e_theta_n[2]],
+                [e_phi_n[0], e_phi_n[1], e_phi_n[2]],
+            ]),
+            self.V_mat.element.interpolation_points(),
+        )
+
         # temp values to store the new computed field of orientation
         # !!!! THESE ARE NECESSARY BECAUSE OF THE cross-references in the expressions
-        self.e_theta_t = fem.Function(self.V_vec) 
-        self.e_r_t = fem.Function(self.V_vec) 
-        self.e_phi_t = fem.Function(self.V_vec) 
-        
+        self.frame_t = fem.Function(self.V_mat)
+        self.e_theta_t = fem.Function(self.V_vec)
+        self.e_r_t = fem.Function(self.V_vec)
+        self.e_phi_t = fem.Function(self.V_vec)
+
         # axial strain
         self.lambda_er = fem.Function(self.V_scalar) ##### !!!!!! doublon sur le stockage de dfib entre inclusion et nl_young_modulus #####
         axial_strain = ufl.dot(self.e_r, ufl.dot(self.Fn, self.e_r))
         self.lambda_er_expr = fem.Expression(axial_strain, self.V_scalar.element.interpolation_points())
-        
+
         # Non constant young modulus
         if isinstance(self.E, nn_cst_young_modulus):
             self.E.init_func(axial_strain)
 
-        
+
     def update_micro_mech(self):
         """
-        update micro mechanics in inclusion for an increment of duj macro displacement field : deformation gradient Fn, kirchhoff stress taun 
+        update micro mechanics in inclusion for an increment of duj macro displacement field : deformation gradient Fn, kirchhoff stress taun
         Also rotation -> orientation fields. Update the localization matrix A_inf since it is an inverse_6_6 matrix -> needs to be updated at each numerical step.
         For non constant stiffness parameters : update stretch measure lambda_er and young modulus E.
         """
@@ -903,23 +1046,33 @@ class Spheroidal_inclusion:
         self.dtau.x.scatter_forward()
         self.taun.x.array[:] += self.dtau.x.array[:] # update cauchy stresses in inclusions
         self.taun.x.scatter_forward()
-        
+
         # update strain
         self.dF.interpolate(self.dF_expr, self.cells)
         self.dF.x.scatter_forward()
         self.Fn.x.array[:] += self.dF.x.array[:] # store total strain
         self.Fn.x.scatter_forward()
-        
-        # update rotations in the temporary fields
-        self.e_theta_t.interpolate(self.e_theta_expr, self.cells)
+
+        # update rotations - single combined interpolation, then split
+        # numerically (same pattern as inverse_matrix6_6.update_func())
+        self.frame_t.interpolate(self.frame_expr, self.cells)
+        self.frame_t.x.scatter_forward()
+
+        nb_elem = len(self.frame_t.x.array)//9
+        frame_field = self.frame_t.x.array.reshape(nb_elem, 3, 3)
+        e_r_field = np.zeros((nb_elem, 3))
+        e_theta_field = np.zeros((nb_elem, 3))
+        e_phi_field = np.zeros((nb_elem, 3))
+        e_r_field[self.cells, :] = frame_field[self.cells, 0, :]
+        e_theta_field[self.cells, :] = frame_field[self.cells, 1, :]
+        e_phi_field[self.cells, :] = frame_field[self.cells, 2, :]
+        self.e_r_t.x.array[:] = e_r_field.reshape(nb_elem*3)
+        self.e_theta_t.x.array[:] = e_theta_field.reshape(nb_elem*3)
+        self.e_phi_t.x.array[:] = e_phi_field.reshape(nb_elem*3)
         self.e_theta_t.x.scatter_forward()
-        
-        self.e_r_t.interpolate(self.e_r_expr, self.cells)
         self.e_r_t.x.scatter_forward()
-        
-        self.e_phi_t.interpolate(self.e_phi_expr, self.cells)
         self.e_phi_t.x.scatter_forward()
-        
+
         # transfer the new orientations within the orientation fields
         self.e_theta.x.array[:] = self.e_theta_t.x.array[:]
         self.e_theta.x.scatter_forward()
@@ -1004,7 +1157,7 @@ class Active_Spheroidal_inclusion:
         
         # Volumic Fraction
         if (type(mat["volumic_fraction"]) is float) or (type(mat["volumic_fraction"]) is np.float64):
-            self.f = cst_param(mat["volumic_fraction"], geom['scalar spacefunction'])
+            self.f = cst_scalar(mat["volumic_fraction"], geom['scalar spacefunction'])
         elif (type(mat["volumic_fraction"]) is list or type(mat["volumic_fraction"]) is np.ndarray): #--> in case of non constant volume fraction
             self.f = nn_uniform_param(mat["volumic_fraction"], geom['scalar spacefunction'], geom['cells']) 
         else:
@@ -1013,7 +1166,7 @@ class Active_Spheroidal_inclusion:
 
         # Young Modulus properties
         if mat["young_type"]=="Constant":
-            self.E = cst_param(mat["young"], geom['scalar spacefunction'])
+            self.E = cst_scalar(mat["young"], geom['scalar spacefunction'])
         elif mat["young_type"]=="Exponential" or mat["young_type"]=="Plateau-Ramp-Plateau":
             self.E = nn_cst_young_modulus(mat["young_type"], mat["young"], geom['scalar spacefunction'], geom['domain'], geom['cells'])
         else:
@@ -1024,8 +1177,9 @@ class Active_Spheroidal_inclusion:
         self.k = self.E.func[0]/(3*(1-2*self.nu))
         
         # Reference mechanical properties (matrix)
-        self.mu_0 = fem.Constant(domain, np.float64(mat["mu_0"]))
-        self.k_0 = fem.Constant(domain, np.float64(mat["k_0"]))
+        # numeric snapshot (plain float), see material_class.py module docstring
+        self.mu_0 = cst_scalar(mat["mu_0"], geom['scalar spacefunction'])
+        self.k_0 = cst_scalar(mat["k_0"], geom['scalar spacefunction'])
         
         # Cylinder orientation
         self.theta = np.pi/180*mat["theta"]
@@ -1105,9 +1259,10 @@ class Active_Spheroidal_inclusion:
         called by : active_spheroidal_inclusion.__init__
         Solution of the eshelby problem for a spheroid aligned with the third vector of the local basis : [e_theta, e_phi, e_r]. Based on shape of inclusion and stiffness matrix of reference C0
         """
-        nu_0 = (3*self.k_0 - 2*self.mu_0)/(2*(3*self.k_0 + self.mu_0))
+        # plain floats required - see Spheroidal_inclusion.eshelby_isomatrix
+        nu_0 = (3*self.k_0.value - 2*self.mu_0.value)/(2*(3*self.k_0.value + self.mu_0.value))
         # self.type == 'homeostatic spheroid':
-        self.L = ufl.as_tensor(eshelby_aux_spheroid(nu_0, self.shape_ratio))
+        self.L = ufl.as_tensor(eshelby_aux_spheroid(nu_0, self.shape_ratio.value))
             
         i, j, k, l = ufl.indices(4)
         
@@ -1125,8 +1280,8 @@ class Active_Spheroidal_inclusion:
         Notations used are the ones from ZAMM paper
         """
         J,K,I = projection_tensors()
-        C0 = 2*self.mu_0*ufl.as_matrix(K) + 3*self.k_0*ufl.as_matrix(J)
-        C0inv = 1/(2*self.mu_0)*ufl.as_matrix(K) + 1/(3*self.k_0)*ufl.as_matrix(J)
+        C0 = 2*self.mu_0[0]*ufl.as_matrix(K) + 3*self.k_0[0]*ufl.as_matrix(J)
+        C0inv = 1/(2*self.mu_0[0])*ufl.as_matrix(K) + 1/(3*self.k_0[0])*ufl.as_matrix(J)
         
         self.P = ufl.dot(self.S_esh, C0inv) # Symmetric Mandel notation 6*6 tensors
         #self.A_inf = ufl.as_matrix(inv_mat_6_6(ufl.as_matrix(I) + ufl.dot(self.P, self.C - C0)))
@@ -1192,9 +1347,13 @@ class Active_Spheroidal_inclusion:
             delta_t : increment of time for inelastic components.
         New attributes created here :
             dtau_dirder, dtau_incr : stress rate in direction du, and incremental counterpart. The first one is used in the Newton Raphson linearization, the second in computing the increment.
-            dtau_expr, dF_expr : fenicsx expression that computes respectively the increment of stress and the increment of deformation gradient in the matrix in the whole domain.
-            dF_inel_expr : fenicsx expression that computes the increment of inelastic deformation gradient.
-            e_r_expr, e_theta_expr, e_phi_expr : fenicsx expression that computes the new orientation fields.
+            dtau_expr : fenicsx expression that computes the increment of stress in the matrix in the whole domain.
+            dF_bundle_expr : fenicsx expression that computes, bundled into a single (3,6) expression to
+                cut compile count, the increment of deformation gradient (cols 0:3) and inelastic
+                deformation gradient (cols 3:6). Split into dF/dF_inel numerically in update_micro_mech.
+            frame_expr : fenicsx expression that computes the new e_r/e_theta/e_phi orientation vectors,
+                bundled into a single (3,3) expression (rows) to cut compile count. Split into
+                e_r_t/e_theta_t/e_phi_t numerically in update_micro_mech.
             lambda_er_expr : fenicsx expression that computes the stretch measure used in non-constant young modulus
         """
         self.dtau = fem.Function(self.V_mandel)
@@ -1230,44 +1389,86 @@ class Active_Spheroidal_inclusion:
         
         # Stress and Strain increment expressions
         self.dtau_expr = fem.Expression(self.dtau_incr, self.V_mandel.element.interpolation_points()) # local increment of stress
-        self.dF_expr = fem.Expression(ufl.dot((self.d_incr + self.w_incr), self.Fn), self.V_mat.element.interpolation_points()) 
-        
-        
+
         # Manage inelastic increments
         l_inel = self.d_inel # regulatory mechanism is only a contraction; rotation comes from the interaction with other components
-        F_el_inv = ufl.dot(self.F_inel, ufl.inv(self.Fn)) 
+        F_el_inv = ufl.dot(self.F_inel, ufl.inv(self.Fn))
         self.F_dot_inel = ufl.dot(F_el_inv, ufl.dot(l_inel, self.Fn))
-        self.dF_inel_expr = fem.Expression(delta_t*self.F_dot_inel, self.V_mat.element.interpolation_points()) 
-        
-        
+
+        # dF_expr and dF_inel_expr both target V_mat (3,3) - bundled into ONE
+        # fem.Expression (a (3,6) matrix: cols 0:3 = dF, cols 3:6 = dF_inel) so
+        # this costs 1 compile here instead of 2. Split back numerically in
+        # update_micro_mech - no change to the underlying math.
+        dF_form = ufl.dot((self.d_incr + self.w_incr), self.Fn)
+        dF_inel_form = delta_t*self.F_dot_inel
+        self.V_mat_bundle2 = fem.functionspace(self.V_mat.mesh, ("DG", 0, (3, 6)))
+        self.dF_bundle_expr = fem.Expression(
+            ufl.as_matrix([
+                [dF_form[0, 0], dF_form[0, 1], dF_form[0, 2], dF_inel_form[0, 0], dF_inel_form[0, 1], dF_inel_form[0, 2]],
+                [dF_form[1, 0], dF_form[1, 1], dF_form[1, 2], dF_inel_form[1, 0], dF_inel_form[1, 1], dF_inel_form[1, 2]],
+                [dF_form[2, 0], dF_form[2, 1], dF_form[2, 2], dF_inel_form[2, 0], dF_inel_form[2, 1], dF_inel_form[2, 2]],
+            ]),
+            self.V_mat_bundle2.element.interpolation_points(),
+        )
+        self.dF_bundle_t = fem.Function(self.V_mat_bundle2)
+
         # Orientation vectors
         e_r_ = ufl.dot(ufl.as_matrix(np.eye(3)) + self.d_incr + self.w_incr, self.e_r)
         e_theta_temp = ufl.dot(ufl.as_matrix(np.eye(3)) + self.d_incr + self.w_incr, self.e_theta)
-    
-        self.e_r_expr = fem.Expression(e_r_ / ufl.sqrt(ufl.dot(e_r_, e_r_)), self.V_vec.element.interpolation_points())
-        
+
+        e_r_n = e_r_ / ufl.sqrt(ufl.dot(e_r_, e_r_))
+
         e_theta_ = e_theta_temp - ufl.dot(e_theta_temp, e_r_)*e_r_
-        self.e_theta_expr = fem.Expression(e_theta_ / ufl.sqrt(ufl.dot(e_theta_, e_theta_)), self.V_vec.element.interpolation_points())
-        
+        e_theta_n = e_theta_ / ufl.sqrt(ufl.dot(e_theta_, e_theta_))
+
         e_phi_ = ufl.cross(e_r_, e_theta_)
-        self.e_phi_expr = fem.Expression(e_phi_ / ufl.sqrt(ufl.dot(e_phi_, e_phi_)), self.V_vec.element.interpolation_points())
-        
+        e_phi_n = e_phi_ / ufl.sqrt(ufl.dot(e_phi_, e_phi_))
+
+        # e_r_expr/e_theta_expr/e_phi_expr all target V_vec (3,) and only depend
+        # on the PRE-update self.e_r/self.e_theta - bundled into ONE (3,3)
+        # fem.Expression (rows = e_r, e_theta, e_phi) reusing V_mat's interpolation
+        # points, so this costs 1 compile here instead of 3. Split back
+        # numerically in update_micro_mech - no change to the underlying math.
+        self.frame_expr = fem.Expression(
+            ufl.as_matrix([
+                [e_r_n[0], e_r_n[1], e_r_n[2]],
+                [e_theta_n[0], e_theta_n[1], e_theta_n[2]],
+                [e_phi_n[0], e_phi_n[1], e_phi_n[2]],
+            ]),
+            self.V_mat.element.interpolation_points(),
+        )
+
         # temp values to store the new computed field of orientation
         # !!!! THESE ARE NECESSARY BECAUSE OF THE cross-references in the expressions
-        self.e_theta_t = fem.Function(self.V_vec) 
-        self.e_r_t = fem.Function(self.V_vec) 
-        self.e_phi_t = fem.Function(self.V_vec) 
-        
+        self.frame_t = fem.Function(self.V_mat)
+        self.e_theta_t = fem.Function(self.V_vec)
+        self.e_r_t = fem.Function(self.V_vec)
+        self.e_phi_t = fem.Function(self.V_vec)
+
         # axial strain
         self.lambda_er = fem.Function(self.V_scalar) ##### !!!!!! doublon sur le stockage de dfib entre inclusion et nl_young_modulus #####
         axial_strain = ufl.dot(self.e_r, ufl.dot(self.Fn, self.e_r))
         self.lambda_er_expr = fem.Expression(axial_strain, self.V_scalar.element.interpolation_points())
-        
+
         # Non constant young modulus
         # ERROR IN MAKING THE YOUNG MODULUS DEPEND ON THE WHOLE AXIAL STRAIN AND NOT ON THE ELASTIC PART
         if isinstance(self.E, nn_cst_young_modulus):
             self.E.init_func(axial_strain)
         
+    def set_parameters(self, mat):
+        """
+        Push new values for this inclusion's young modulus and volumic
+        fraction, in place, without rebuilding any form (no recompilation).
+        mat is a (possibly partial) dict shaped like the corresponding json
+        card entry. Poisson ratio is NOT covered here (kept as a plain
+        fem.Constant on this class, not yet migrated to cst_scalar) - update
+        it by rebuilding via setup_simulation() if it needs to change.
+        """
+        if "young" in mat:
+            self.E.set_value(mat["young"])
+        if "volumic_fraction" in mat:
+            self.f.set_value(mat["volumic_fraction"])
+
     def update_micro_mech(self):
         """
         update micro mechanics in inclusion for an increment of duj macro displacement field : deformation gradient Fn, kirchhoff stress taun and inelastic deformation gradient F_inel.
@@ -1279,30 +1480,49 @@ class Active_Spheroidal_inclusion:
         self.dtau.x.scatter_forward()
         self.taun.x.array[:] += self.dtau.x.array[:] # update cauchy stresses in inclusions
         self.taun.x.scatter_forward()
-        
-                
-        # compute increment of strain
-        self.dF.interpolate(self.dF_expr, self.cells)
+
+        # compute increment of strain - single combined interpolation, then
+        # split numerically (same pattern as inverse_matrix6_6.update_func())
+        self.dF_bundle_t.interpolate(self.dF_bundle_expr, self.cells)
+        self.dF_bundle_t.x.scatter_forward()
+
+        nb_elem = len(self.dF_bundle_t.x.array)//18
+        bundle_field = self.dF_bundle_t.x.array.reshape(nb_elem, 3, 6)
+        dF_field = np.zeros((nb_elem, 3, 3))
+        dF_inel_field = np.zeros((nb_elem, 3, 3))
+        dF_field[self.cells, :, :] = bundle_field[self.cells, :, 0:3]
+        dF_inel_field[self.cells, :, :] = bundle_field[self.cells, :, 3:6]
+        self.dF.x.array[:] = dF_field.reshape(nb_elem*9)
+        self.dF_inel.x.array[:] = dF_inel_field.reshape(nb_elem*9)
         self.dF.x.scatter_forward()
-        self.dF_inel.interpolate(self.dF_inel_expr, self.cells)
         self.dF_inel.x.scatter_forward()
-        
+
         # update strain deformation gradients
         self.Fn.x.array[:] += self.dF.x.array[:] # store total strain
-        self.Fn.x.scatter_forward()   
-        self.F_inel.x.array[:] += self.dF_inel.x.array[:] 
-        self.F_inel.x.scatter_forward()   
-        
-        # update rotations in the temporary fields
-        self.e_theta_t.interpolate(self.e_theta_expr, self.cells)
+        self.Fn.x.scatter_forward()
+        self.F_inel.x.array[:] += self.dF_inel.x.array[:]
+        self.F_inel.x.scatter_forward()
+
+        # update rotations - single combined interpolation, then split
+        # numerically (same pattern as inverse_matrix6_6.update_func())
+        self.frame_t.interpolate(self.frame_expr, self.cells)
+        self.frame_t.x.scatter_forward()
+
+        nb_elem = len(self.frame_t.x.array)//9
+        frame_field = self.frame_t.x.array.reshape(nb_elem, 3, 3)
+        e_r_field = np.zeros((nb_elem, 3))
+        e_theta_field = np.zeros((nb_elem, 3))
+        e_phi_field = np.zeros((nb_elem, 3))
+        e_r_field[self.cells, :] = frame_field[self.cells, 0, :]
+        e_theta_field[self.cells, :] = frame_field[self.cells, 1, :]
+        e_phi_field[self.cells, :] = frame_field[self.cells, 2, :]
+        self.e_r_t.x.array[:] = e_r_field.reshape(nb_elem*3)
+        self.e_theta_t.x.array[:] = e_theta_field.reshape(nb_elem*3)
+        self.e_phi_t.x.array[:] = e_phi_field.reshape(nb_elem*3)
         self.e_theta_t.x.scatter_forward()
-        
-        self.e_r_t.interpolate(self.e_r_expr, self.cells)
         self.e_r_t.x.scatter_forward()
-        
-        self.e_phi_t.interpolate(self.e_phi_expr, self.cells)
         self.e_phi_t.x.scatter_forward()
-        
+
         # transfer the new orientations within the orientation fields
         self.e_theta.x.array[:] = self.e_theta_t.x.array[:]
         self.e_theta.x.scatter_forward()
@@ -1310,14 +1530,14 @@ class Active_Spheroidal_inclusion:
         self.e_r.x.scatter_forward()
         self.e_phi.x.array[:] = self.e_phi_t.x.array[:]
         self.e_phi.x.scatter_forward()
-        
+
         # update localization matrix with the new orientation
         self.A_inf.update_func()
-        
+
         # update fiber extension
         self.lambda_er.interpolate(self.lambda_er_expr, self.cells)
         self.lambda_er.x.scatter_forward()
-            
+
         self.E.update_func()
         
 
@@ -1383,7 +1603,7 @@ class Prestretched_Cylinder_inclusion:
         
         # Volumic Fraction
         if (type(mat["volumic_fraction"]) is float) or (type(mat["volumic_fraction"]) is np.float64):
-            self.f = cst_param(mat["volumic_fraction"], geom['scalar spacefunction'])
+            self.f = cst_scalar(mat["volumic_fraction"], geom['scalar spacefunction'])
         elif (type(mat["volumic_fraction"]) is list or type(mat["volumic_fraction"]) is np.ndarray): #--> in case of non constant volume fraction
             self.f = nn_uniform_param(mat["volumic_fraction"], geom['scalar spacefunction'], geom['cells']) 
         else:
@@ -1391,7 +1611,7 @@ class Prestretched_Cylinder_inclusion:
 
         # Young Modulus properties
         if mat["young_type"]=="Constant":
-            self.E = cst_param(mat["young"], geom['scalar spacefunction'])
+            self.E = cst_scalar(mat["young"], geom['scalar spacefunction'])
         elif mat["young_type"]=="Exponential" or mat["young_type"]=="Plateau-Ramp-Plateau":
             self.E = nn_cst_young_modulus(mat["young_type"], mat["young"], geom['scalar spacefunction'], geom['domain'], geom['cells'])
         else:
@@ -1402,8 +1622,9 @@ class Prestretched_Cylinder_inclusion:
         self.k = self.E.func[0]/(3*(1-2*self.nu))
         
         # Reference mechanical properties (matrix)
-        self.mu_0 = fem.Constant(domain, np.float64(mat["mu_0"]))
-        self.k_0 = fem.Constant(domain, np.float64(mat["k_0"]))
+        # numeric snapshot (plain float), see material_class.py module docstring
+        self.mu_0 = cst_scalar(mat["mu_0"], geom['scalar spacefunction'])
+        self.k_0 = cst_scalar(mat["k_0"], geom['scalar spacefunction'])
         
         # Cylinder orientation
         self.theta = np.pi/180*mat["theta"]
@@ -1479,7 +1700,8 @@ class Prestretched_Cylinder_inclusion:
         caller : Cylindrical_inclusion.__init__
         Solution of the eshelby problem for a cylinder aligned with the third vector of the local basis : [e_theta, e_phi, e_r]. Based on shape of inclusion and stiffness matrix of reference C0
         """
-        nu_0 = (3*self.k_0 - 2*self.mu_0)/(2*(3*self.k_0 + self.mu_0))
+        # plain floats required - see Spheroidal_inclusion.eshelby_isomatrix
+        nu_0 = (3*self.k_0.value - 2*self.mu_0.value)/(2*(3*self.k_0.value + self.mu_0.value))
         
         self.L = ufl.as_tensor(eshelby_aux_cylindrical(nu_0))
         i, j, k, l = ufl.indices(4)
@@ -1498,8 +1720,8 @@ class Prestretched_Cylinder_inclusion:
         Notations used are the ones from ZAMM paper
         """
         J,K,I = projection_tensors()
-        C0 = 2*self.mu_0*ufl.as_matrix(K) + 3*self.k_0*ufl.as_matrix(J)
-        C0inv = 1/(2*self.mu_0)*ufl.as_matrix(K) + 1/(3*self.k_0)*ufl.as_matrix(J)
+        C0 = 2*self.mu_0[0]*ufl.as_matrix(K) + 3*self.k_0[0]*ufl.as_matrix(J)
+        C0inv = 1/(2*self.mu_0[0])*ufl.as_matrix(K) + 1/(3*self.k_0[0])*ufl.as_matrix(J)
         
         self.P = ufl.dot(self.S_esh, C0inv) # Symmetric Mandel notation 6*6 tensors
         #self.A_inf = ufl.as_matrix(inv_mat_6_6(ufl.as_matrix(I) + ufl.dot(self.P, self.C - C0)))
@@ -1557,9 +1779,13 @@ class Prestretched_Cylinder_inclusion:
             delta_t : increment of time for inelastic components.
         New attributes created here :
             dtau_dirder, dtau_incr : stress rate in direction du, and incremental counterpart. The first one is used in the Newton Raphson linearization, the second in computing the increment.
-            dtau_expr, dF_expr : fenicsx expression that computes respectively the increment of stress and the increment of deformation gradient in the matrix in the whole domain.
-            dF_inel_expr : fenicsx expression that computes the increment of inelastic deformation gradient.
-            e_r_expr, e_theta_expr, e_phi_expr : fenicsx expression that computes the new orientation fields.
+            dtau_expr : fenicsx expression that computes the increment of stress in the matrix in the whole domain.
+            dF_bundle_expr : fenicsx expression that computes, bundled into a single (3,6) expression to
+                cut compile count, the increment of deformation gradient (cols 0:3) and inelastic
+                deformation gradient (cols 3:6). Split into dF/dF_inel numerically in update_micro_mech.
+            frame_expr : fenicsx expression that computes the new e_r/e_theta/e_phi orientation vectors,
+                bundled into a single (3,3) expression (rows) to cut compile count. Split into
+                e_r_t/e_theta_t/e_phi_t numerically in update_micro_mech.
             lambda_er_expr : fenicsx expression that computes the stretch measure used in non-constant young modulus
         """
         self.dtau = fem.Function(self.V_mandel)
@@ -1595,33 +1821,61 @@ class Prestretched_Cylinder_inclusion:
         
         # Stress and Strain increment expressions
         self.dtau_expr = fem.Expression(self.dtau_incr, self.V_mandel.element.interpolation_points()) # local increment of stress
-        self.dF_expr = fem.Expression(ufl.dot((self.d_incr + self.w_incr), self.Fn), self.V_mat.element.interpolation_points()) 
-        
-        
+
         # Manage inelastic increments
         l_inel = self.d_inel # regulatory mechanism is only a contraction; rotation comes from the interaction with other components
-        F_el_inv = ufl.dot(self.F_inel, ufl.inv(self.Fn)) 
+        F_el_inv = ufl.dot(self.F_inel, ufl.inv(self.Fn))
         self.F_dot_inel = ufl.dot(F_el_inv, ufl.dot(l_inel, self.Fn))
-        self.dF_inel_expr = fem.Expression(delta_t*self.F_dot_inel, self.V_mat.element.interpolation_points()) 
-        
-        
+
+        # dF_expr and dF_inel_expr both target V_mat (3,3) - bundled into ONE
+        # fem.Expression (a (3,6) matrix: cols 0:3 = dF, cols 3:6 = dF_inel) so
+        # this costs 1 compile here instead of 2. Split back numerically in
+        # update_micro_mech - no change to the underlying math.
+        dF_form = ufl.dot((self.d_incr + self.w_incr), self.Fn)
+        dF_inel_form = delta_t*self.F_dot_inel
+        self.V_mat_bundle2 = fem.functionspace(self.V_mat.mesh, ("DG", 0, (3, 6)))
+        self.dF_bundle_expr = fem.Expression(
+            ufl.as_matrix([
+                [dF_form[0, 0], dF_form[0, 1], dF_form[0, 2], dF_inel_form[0, 0], dF_inel_form[0, 1], dF_inel_form[0, 2]],
+                [dF_form[1, 0], dF_form[1, 1], dF_form[1, 2], dF_inel_form[1, 0], dF_inel_form[1, 1], dF_inel_form[1, 2]],
+                [dF_form[2, 0], dF_form[2, 1], dF_form[2, 2], dF_inel_form[2, 0], dF_inel_form[2, 1], dF_inel_form[2, 2]],
+            ]),
+            self.V_mat_bundle2.element.interpolation_points(),
+        )
+        self.dF_bundle_t = fem.Function(self.V_mat_bundle2)
+
         # Orientation vectors
         e_r_ = ufl.dot(ufl.as_matrix(np.eye(3)) + self.d_incr + self.w_incr, self.e_r)
         e_theta_temp = ufl.dot(ufl.as_matrix(np.eye(3)) + self.d_incr + self.w_incr, self.e_theta)
-    
-        self.e_r_expr = fem.Expression(e_r_ / ufl.sqrt(ufl.dot(e_r_, e_r_)), self.V_vec.element.interpolation_points())
-        
+
+        e_r_n = e_r_ / ufl.sqrt(ufl.dot(e_r_, e_r_))
+
         e_theta_ = e_theta_temp - ufl.dot(e_theta_temp, e_r_)*e_r_
-        self.e_theta_expr = fem.Expression(e_theta_ / ufl.sqrt(ufl.dot(e_theta_, e_theta_)), self.V_vec.element.interpolation_points())
-        
+        e_theta_n = e_theta_ / ufl.sqrt(ufl.dot(e_theta_, e_theta_))
+
         e_phi_ = ufl.cross(e_r_, e_theta_)
-        self.e_phi_expr = fem.Expression(e_phi_ / ufl.sqrt(ufl.dot(e_phi_, e_phi_)), self.V_vec.element.interpolation_points())
-        
+        e_phi_n = e_phi_ / ufl.sqrt(ufl.dot(e_phi_, e_phi_))
+
+        # e_r_expr/e_theta_expr/e_phi_expr all target V_vec (3,) and only depend
+        # on the PRE-update self.e_r/self.e_theta - bundled into ONE (3,3)
+        # fem.Expression (rows = e_r, e_theta, e_phi) reusing V_mat's interpolation
+        # points, so this costs 1 compile here instead of 3. Split back
+        # numerically in update_micro_mech - no change to the underlying math.
+        self.frame_expr = fem.Expression(
+            ufl.as_matrix([
+                [e_r_n[0], e_r_n[1], e_r_n[2]],
+                [e_theta_n[0], e_theta_n[1], e_theta_n[2]],
+                [e_phi_n[0], e_phi_n[1], e_phi_n[2]],
+            ]),
+            self.V_mat.element.interpolation_points(),
+        )
+
         # temp values to store the new computed field of orientation
         # !!!! THESE ARE NECESSARY BECAUSE OF THE cross-references in the expressions
-        self.e_theta_t = fem.Function(self.V_vec) 
-        self.e_r_t = fem.Function(self.V_vec) 
-        self.e_phi_t = fem.Function(self.V_vec) 
+        self.frame_t = fem.Function(self.V_mat)
+        self.e_theta_t = fem.Function(self.V_vec)
+        self.e_r_t = fem.Function(self.V_vec)
+        self.e_phi_t = fem.Function(self.V_vec)
 
         # Non constant young modulus
         if isinstance(self.E, nn_cst_young_modulus):
@@ -1635,6 +1889,20 @@ class Prestretched_Cylinder_inclusion:
             
             self.E.init_func(elastic_stretch)
         
+    def set_parameters(self, mat):
+        """
+        Push new values for this inclusion's young modulus and volumic
+        fraction, in place, without rebuilding any form (no recompilation).
+        mat is a (possibly partial) dict shaped like the corresponding json
+        card entry. Poisson ratio is NOT covered here (kept as a plain
+        fem.Constant on this class, not yet migrated to cst_scalar) - update
+        it by rebuilding via setup_simulation() if it needs to change.
+        """
+        if "young" in mat:
+            self.E.set_value(mat["young"])
+        if "volumic_fraction" in mat:
+            self.f.set_value(mat["volumic_fraction"])
+
     def update_micro_mech(self):
         """
         update micro mechanics in inclusion for an increment of duj macro displacement field : deformation gradient Fn, kirchhoff stress taun and inelastic deformation gradient F_inel
@@ -1646,30 +1914,49 @@ class Prestretched_Cylinder_inclusion:
         self.dtau.x.scatter_forward()
         self.taun.x.array[:] += self.dtau.x.array[:] # update cauchy stresses in inclusions
         self.taun.x.scatter_forward()
-        
-                
-        # compute increment of strain
-        self.dF.interpolate(self.dF_expr, self.cells)
+
+        # compute increment of strain - single combined interpolation, then
+        # split numerically (same pattern as inverse_matrix6_6.update_func())
+        self.dF_bundle_t.interpolate(self.dF_bundle_expr, self.cells)
+        self.dF_bundle_t.x.scatter_forward()
+
+        nb_elem = len(self.dF_bundle_t.x.array)//18
+        bundle_field = self.dF_bundle_t.x.array.reshape(nb_elem, 3, 6)
+        dF_field = np.zeros((nb_elem, 3, 3))
+        dF_inel_field = np.zeros((nb_elem, 3, 3))
+        dF_field[self.cells, :, :] = bundle_field[self.cells, :, 0:3]
+        dF_inel_field[self.cells, :, :] = bundle_field[self.cells, :, 3:6]
+        self.dF.x.array[:] = dF_field.reshape(nb_elem*9)
+        self.dF_inel.x.array[:] = dF_inel_field.reshape(nb_elem*9)
         self.dF.x.scatter_forward()
-        self.dF_inel.interpolate(self.dF_inel_expr, self.cells)
         self.dF_inel.x.scatter_forward()
-        
+
         # update strain deformation gradients
         self.Fn.x.array[:] += self.dF.x.array[:] # store total strain
-        self.Fn.x.scatter_forward()   
-        self.F_inel.x.array[:] += self.dF_inel.x.array[:] 
-        self.F_inel.x.scatter_forward()   
-        
-        # update rotations in the temporary fields
-        self.e_theta_t.interpolate(self.e_theta_expr, self.cells)
+        self.Fn.x.scatter_forward()
+        self.F_inel.x.array[:] += self.dF_inel.x.array[:]
+        self.F_inel.x.scatter_forward()
+
+        # update rotations - single combined interpolation, then split
+        # numerically (same pattern as inverse_matrix6_6.update_func())
+        self.frame_t.interpolate(self.frame_expr, self.cells)
+        self.frame_t.x.scatter_forward()
+
+        nb_elem = len(self.frame_t.x.array)//9
+        frame_field = self.frame_t.x.array.reshape(nb_elem, 3, 3)
+        e_r_field = np.zeros((nb_elem, 3))
+        e_theta_field = np.zeros((nb_elem, 3))
+        e_phi_field = np.zeros((nb_elem, 3))
+        e_r_field[self.cells, :] = frame_field[self.cells, 0, :]
+        e_theta_field[self.cells, :] = frame_field[self.cells, 1, :]
+        e_phi_field[self.cells, :] = frame_field[self.cells, 2, :]
+        self.e_r_t.x.array[:] = e_r_field.reshape(nb_elem*3)
+        self.e_theta_t.x.array[:] = e_theta_field.reshape(nb_elem*3)
+        self.e_phi_t.x.array[:] = e_phi_field.reshape(nb_elem*3)
         self.e_theta_t.x.scatter_forward()
-        
-        self.e_r_t.interpolate(self.e_r_expr, self.cells)
         self.e_r_t.x.scatter_forward()
-        
-        self.e_phi_t.interpolate(self.e_phi_expr, self.cells)
         self.e_phi_t.x.scatter_forward()
-        
+
         # transfer the new orientations within the orientation fields
         self.e_theta.x.array[:] = self.e_theta_t.x.array[:]
         self.e_theta.x.scatter_forward()
@@ -1677,9 +1964,8 @@ class Prestretched_Cylinder_inclusion:
         self.e_r.x.scatter_forward()
         self.e_phi.x.array[:] = self.e_phi_t.x.array[:]
         self.e_phi.x.scatter_forward()
-        
+
         # update localization matrix with the new orientation
         self.A_inf.update_func()
-        
+
         self.E.update_func()
-        

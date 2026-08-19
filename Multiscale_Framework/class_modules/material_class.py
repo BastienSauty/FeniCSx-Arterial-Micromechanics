@@ -1,7 +1,7 @@
 import numpy as np
 import sys
 import ufl
-
+import time
 # Import classes from inclusions
 from Multiscale_Framework.class_modules.inclusions_class import (
     Matrix,
@@ -13,7 +13,7 @@ from Multiscale_Framework.class_modules.inclusions_class import (
 )
 
 # Parameters
-from Multiscale_Framework.class_modules.parameter_class import cst_param, inverse_matrix6_6
+from Multiscale_Framework.class_modules.parameter_class import cst_scalar, inverse_matrix6_6
 
 # Auxiliary functions
 from Multiscale_Framework.function_modules.auxiliary_functions import (
@@ -34,7 +34,48 @@ Classes :
     Homogenized_HD_material : High dilution scheme. 
     Homogenized_MT_material : Mori-Tanaka scheme (symmetrized) with passive elastic response of its microscopic constituents.
     Active_MT_material : unsymmetrized Mori-Tanaka scheme WITH inelastic behavior. These inelastic behaviors are defined for each active inclusions (see inclusions_class).
+
+Note on mu_0/k_0 (the reference matrix moduli every inclusion needs for its
+Eshelby/localization tensors) : these MUST be plain python floats, not a UFL
+expression. Each inclusion's Eshelby tensor is built (once, at construction,
+in inclusions_class.py's eshelby_isomatrix()) via eshelby_aux_spheroid(), which
+runs a genuine scipy.integrate.quad numerical integration - fundamentally
+incompatible with a symbolic/live value, regardless of any UFL Constant
+indexing trick. So mu_0/k_0 are computed HERE as numeric snapshots (see
+_numeric_reference_moduli below) from the matrix's young modulus/poisson
+ratio, and stored in each inclusion as a cst_scalar - this is also physically
+standard for Eshelby-based homogenization : the comparison medium is fixed
+for the life of the mechanical problem, not something that evolves.
+/!\ Consequence : if the matrix's own young modulus/poisson ratio is changed
+later (e.g. Matrix.set_parameters() during calibration), the matrix's OWN
+constitutive law (self.matrix.C, built from self.matrix.E/nu directly) stays
+correct automatically (it's genuinely symbolic), but each inclusion's
+mu_0/k_0 and its already-built Eshelby tensors (S_esh, R_esh, A_inf) do NOT
+follow - they were fixed at construction time. update_parameters() below
+deliberately does not try to "refresh" them (that would only update the raw
+mu_0/k_0 value while leaving S_esh/R_esh inconsistent with it, which is worse
+than doing nothing). If the matrix's own properties need to be a genuine
+calibration/sensitivity target, rebuild the subdomain via setup_simulation()
+for that case instead of reusing a persistent context.
 """
+
+
+def _numeric_reference_moduli(matrix):
+    """
+    Compute the matrix's reference shear/bulk moduli (mu_0, k_0) as PLAIN
+    PYTHON FLOATS from its current young modulus / poisson ratio (read from
+    matrix.E.value / matrix.nu.value - the numeric side of cst_scalar,
+    distinct from matrix.E[0]/matrix.nu[0] which stay symbolic UFL). See the
+    module docstring above for why these must be real numbers rather than a
+    live UFL expression - eshelby_aux_spheroid() runs a numerical integration
+    that cannot accept a symbolic value.
+    """
+    E0 = float(matrix.E.value)
+    nu0 = float(matrix.nu.value)
+    mu0 = E0/(2*(1+nu0))
+    k0 = E0/(3*(1-2*nu0))
+    return mu0, k0
+
 
 ##########################################################################
 ## Different materials definition
@@ -76,12 +117,21 @@ class Isotropic_Elastic_material:
         ### Define matrix
         self.matrix = Matrix(material["matrix"], material["geometry"])
         self.inclusions = {}
-        self.matrix.f = cst_param(1, material["geometry"]["scalar spacefunction"])
+        self.matrix.f = cst_scalar(1, material["geometry"]["scalar spacefunction"])
         
         ## Inelastic contribution for consistency with all material classes.
         self.matrix.inelastic_contribution(None) #ufl.as_tensor(np.zeros((3,3))))
-        
-        
+
+    def update_parameters(self, material):
+        """
+        Push new matrix parameters, in place, no recompilation. material is a
+        (possibly partial) dict shaped like this subdomain's json card, e.g.
+        {"matrix": {"young": 0.06}}. No inclusions to update - this material
+        is 100% matrix by construction.
+        """
+        if "matrix" in material:
+            self.matrix.set_parameters(material["matrix"])
+
     def homogenization_scheme(self, l_el, l_elj, delta_t):
         """
         Create the constitutive law arising from mulsticale homogenization.
@@ -153,10 +203,12 @@ class Homogenized_HD_material:
         # Total volumic fraction of inclusions :
         f_incl_form = 0.0
         
+        mu0_ref, k0_ref = _numeric_reference_moduli(self.matrix)
         for name_incl in self.inclusions_keys:
-            # reference values of the matrix for stiffnesses
-            material[name_incl]["mu_0"] = self.matrix.mu # scalar value
-            material[name_incl]["k_0"] = self.matrix.k # scalar value
+            # reference values of the matrix for stiffnesses - plain numeric
+            # floats, see _numeric_reference_moduli and the module docstring
+            material[name_incl]["mu_0"] = mu0_ref
+            material[name_incl]["k_0"] = k0_ref
             if material[name_incl]["type"] == "sphere":
                 # Spheric inclusion
                 # create material using the spherical inclusion dictionnary
@@ -191,6 +243,26 @@ class Homogenized_HD_material:
         self.matrix.inelastic_contribution(None)
         
         
+    def update_parameters(self, material):
+        """
+        Push a new (possibly partial) set of physical parameters - shaped like
+        the json card used to build this material - into the existing matrix
+        and inclusion objects, in place. No UFL form or fem.Expression is
+        rebuilt, so this never triggers an FFCx JIT recompilation.
+        """
+        if "matrix" in material:
+            self.matrix.set_parameters(material["matrix"])
+        for name_incl in self.inclusions_keys:
+            if name_incl in material:
+                self.inclusions[name_incl].set_parameters(material[name_incl])
+        # NOTE: deliberately NOT refreshing mu_0/k_0 here even if
+        # material["matrix"] changed young/poisson above - they (and the
+        # Eshelby tensors built from them) are numeric snapshots fixed at
+        # construction time, see the module docstring for why. Calibrating
+        # the matrix's own young modulus/poisson ratio requires rebuilding
+        # this subdomain via setup_simulation() instead of update_parameters().
+        self.matrix.f.refresh()
+
     def homogenization_scheme(self, l_el, l_elj, delta_t):
         """
         Create the constitutive law arising from mulsticale homogenization
@@ -272,10 +344,12 @@ class Homogenized_MT_material:
         # Total volumic fraction of inclusions :
         f_incl_form = 0.0
         
+        mu0_ref, k0_ref = _numeric_reference_moduli(self.matrix)
         for name_incl in self.inclusions_keys:
-            # reference values of the matrix for stiffnesses
-            material[name_incl]["mu_0"] = self.matrix.mu # scalar value
-            material[name_incl]["k_0"] = self.matrix.k # scalar value
+            # reference values of the matrix for stiffnesses - plain numeric
+            # floats, see _numeric_reference_moduli and the module docstring
+            material[name_incl]["mu_0"] = mu0_ref
+            material[name_incl]["k_0"] = k0_ref
 
             if material[name_incl]["type"] == "sphere":
                 # spheroid inclusion
@@ -310,6 +384,39 @@ class Homogenized_MT_material:
         self.matrix.inelastic_contribution(None)
         
         
+    def update_parameters(self, material):
+        """
+        Push a new (possibly partial) set of physical parameters - shaped like the
+        json card used to build this material - into the existing matrix and
+        inclusion objects, in place. No UFL form or fem.Expression is rebuilt
+        anywhere in this call, so it never triggers an FFCx JIT recompilation ;
+        it is meant to be called every iteration of a calibration / sensitivity
+        loop, right before re-solving the mechanical problem.
+
+        material : dict shaped like the "adventitia"/"media" card, e.g. only the
+            entries you want to change need to be present :
+                {"matrix": {"young": 0.06},
+                 "collagen_0": {"young": [[0.4],[2.0],[1.1]], "theta": -78.3}}
+        """
+        if "matrix" in material:
+            self.matrix.set_parameters(material["matrix"])
+
+        for name_incl in self.inclusions_keys:
+            if name_incl in material:
+                self.inclusions[name_incl].set_parameters(material[name_incl])
+
+        # NOTE: deliberately NOT refreshing mu_0/k_0 here even if
+        # material["matrix"] changed young/poisson above - they (and the
+        # Eshelby tensors built from them) are numeric snapshots fixed at
+        # construction time, see the module docstring for why. Calibrating
+        # the matrix's own young modulus/poisson ratio requires rebuilding
+        # this subdomain via setup_simulation() instead of update_parameters().
+
+        # inclusion volumic fractions may have changed above -> refresh the
+        # matrix's complementary volumic fraction field (cheap re-interpolation
+        # of the expression already built in create_field(), no rebuild)
+        self.matrix.f.refresh()
+
     def homogenization_scheme(self, l_el, l_elj, delta_t):
         """
         Create the constitutive law arising from mulsticale homogenization
@@ -338,9 +445,8 @@ class Homogenized_MT_material:
         Minv += 1/2*self.H1 + 1/2*ufl.dot(ufl.dot(self.H2inv.func, ufl.transpose(self.H1)), self.H2)
         
         self.M = inverse_matrix6_6(Minv, self.V_stiff, self.cells) # M is the inverse of Minv, accessible as M.func
-        
+                
         print("M tensor initialized\n", flush=True)
-        
         #---------------------------------------------------------------------#
         # Localization
         A_m = ufl.as_matrix(np.eye(6))
@@ -427,10 +533,12 @@ class Active_MT_material:
         # Total volumic fraction of inclusions :
         f_incl_form = 0.0
         
+        mu0_ref, k0_ref = _numeric_reference_moduli(self.matrix)
         for name_incl in self.inclusions_keys:
-            # reference values of the matrix for stiffnesses
-            material[name_incl]["mu_0"] = self.matrix.mu # scalar value
-            material[name_incl]["k_0"] = self.matrix.k # scalar value
+            # reference values of the matrix for stiffnesses - plain numeric
+            # floats, see _numeric_reference_moduli and the module docstring
+            material[name_incl]["mu_0"] = mu0_ref
+            material[name_incl]["k_0"] = k0_ref
 
             if material[name_incl]["type"] == "sphere":
                 # Passive sphere inclusion
@@ -478,6 +586,26 @@ class Active_MT_material:
         self.matrix.inelastic_contribution(None)
         
         
+    def update_parameters(self, material):
+        """
+        Push a new (possibly partial) set of physical parameters - shaped like
+        the json card used to build this material - into the existing matrix
+        and inclusion objects, in place. No UFL form or fem.Expression is
+        rebuilt, so this never triggers an FFCx JIT recompilation.
+        """
+        if "matrix" in material:
+            self.matrix.set_parameters(material["matrix"])
+        for name_incl in self.inclusions_keys:
+            if name_incl in material:
+                self.inclusions[name_incl].set_parameters(material[name_incl])
+        # NOTE: deliberately NOT refreshing mu_0/k_0 here even if
+        # material["matrix"] changed young/poisson above - they (and the
+        # Eshelby tensors built from them) are numeric snapshots fixed at
+        # construction time, see the module docstring for why. Calibrating
+        # the matrix's own young modulus/poisson ratio requires rebuilding
+        # this subdomain via setup_simulation() instead of update_parameters().
+        self.matrix.f.refresh()
+
     def homogenization_scheme(self, l_el, l_elj, delta_t):
         """
         Unsymmetrized Mori Tanaka implementation with active behavior. See Ch V and APP A.

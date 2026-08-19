@@ -43,12 +43,13 @@ class ParameterSpec:
 
 from matplotlib.lines import Line2D
 
-mpl.rcParams['text.usetex'] = True
 plt.rcParams.update({
-    "text.usetex": True,          # use LaTeX for all text
-    "font.family": "serif",       # LaTeX default serif font
-    "font.serif": ["Computer Modern"],  # optional, match LaTeX
-    "axes.labelsize": 10,         # adjust label size
+    "text.usetex": True,
+    # Inject Latin Modern and T1 font encoding into the LaTeX preamble
+    "text.latex.preamble": r"\usepackage[T1]{fontenc} \usepackage{lmodern}",
+    "font.family": "serif",
+    "font.serif": ["Latin Modern Roman"], # Matches your thesis main text
+    "axes.labelsize": 10,
     "xtick.labelsize": 9,
     "ytick.labelsize": 9,
     "legend.fontsize": 9

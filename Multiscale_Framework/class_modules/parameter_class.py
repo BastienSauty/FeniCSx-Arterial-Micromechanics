@@ -7,18 +7,30 @@ import sys
 
 """
 A set of classes that are used to define some parameters as fields in a given geometry. 
-These parameters' fields are accessed through self.func in the other objects of the framework, that is mostly in the inclusions_class file.
-For consistency in the inclusions_class, the main changing parameters should be defined using one of these classes (volumic fraction, young modulus). 
-Try to avoid scalars (int, float or np.float64) in the inclusions, as those can mess with the finite element code in fenicsx -> at least fem.Constant.
-/!\ Stiffness of the matrix is defined as fem.Constant for ease of manipulation. Only the inclusions stiffnesses are defined with cst_param and nn_cst_young_modulus /!\
+These parameters' fields are accessed through self.func[0] (or equivalent direct
+indexing self[0] for cst_scalar) in the other objects of the framework, that is
+mostly in the inclusions_class file. Every physical, constant-over-the-domain
+parameter (poisson ratio, volumic fraction, a Constant young modulus, reference
+moduli, shape ratio, active-behavior constants...) goes through cst_scalar, so
+the whole framework shares one calling convention regardless of whether the
+parameter is spatially uniform (cst_scalar), spatially varying (nn_uniform_param),
+or history/state-dependent (nn_cst_young_modulus).
+Never let a raw python scalar leak directly into a symbolic form - use cst_scalar
+instead, at least - as that can mess with the finite element code in fenicsx.
+/!\ Stiffness of the matrix is defined as fem.Constant for ease of manipulation. Only the inclusions stiffnesses are defined with cst_scalar and nn_cst_young_modulus /!\
     
 Classes :
     inverse_matrix6_6 : manage the definition and inversion of a 6*6 matrix in fenicsx. Usefull for the Mori-Tanaka homogenization
-    cst_param : define a constant parameter over a domain. Used for general constant parameters. Necessary for consistency with the call of cst_param.func to get the param field
+    cst_scalar : unified class for any scalar physical parameter, constant over the domain (poisson ratio, volumic fraction, a Constant young modulus, reference moduli, shape ratio...)
     nn_cst_young_modulus : define different types of non-constant young modulus that depends on a scalar value (a scalar measure of the stretch)
     nn_uniform_param : specific class to define a parameter that changes over the geometry of the artery
     matrix_volumic_frac : manage the volumic fraction of the matrix. Especially useful when the other volumic fractions change in the geometry, leading to a non constant volumic frac in the matrix.
 
+Every class in this module implements a set_value() method (parameter-appropriate signature)
+that updates the parameter's existing fem.Constant / fem.Function objects in place. None of
+them rebuild any UFL form or fem.Expression, so calling set_value() never triggers an FFCx
+JIT recompilation - the whole point of these classes is to let a value change (e.g. during
+calibration) independently of the compiled code.
 """
 
 
@@ -71,45 +83,75 @@ class inverse_matrix6_6:
 
 
 #-----------------------------------------------------------------------------#
-#   Scalar Parameters - constant or not ; homogenous or not
+#   Scalar Parameters - constant over the domain, value freely updatable
 #-----------------------------------------------------------------------------#
 
-class cst_param:
+class cst_scalar:
     """
-    General class to manage a parameter that is constant over the volume, but whose value can be changed manualy.
-    This class is used for general scalar parameters that are constant and homogenous like simple volumic fraction or young modulus.
-    /!\ Not for the stiffness of the matrix which is created as a Constant field !
-    access in the construction of the fenicsx forms and expression using cst_param.func[0] 
-            -> [0] is necessary to consider this object as scalar and not vector of shape (1,0)
-        
+    Unified class for ANY scalar physical parameter that is constant over its
+    whole domain but whose value can be changed at any time : poisson ratio,
+    volumic fraction, a Constant-type young modulus, reference matrix moduli
+    (mu_0, k_0), shape ratio, active-behavior constants (alpha, characteristic
+    time, basal stress...). Replaces the former cst_param (which was
+    fem.Function-based) and the ad-hoc bare fem.Constant that used to be
+    scattered across inclusions_class.py, so every "single value, constant
+    over the domain" parameter in the framework now goes through the exact
+    same class and the exact same calling convention.
+
+    Backed by a single fem.Constant of shape (1,) (self.const), so updating
+    its value never touches mesh/DOF machinery the way a fem.Function would
+    (no interpolation, no MPI scatter) - genuinely cheaper than the
+    fem.Function-based cst_param it replaces. It stays a drop-in replacement
+    for cst_param though : cst_scalar[0] (equivalently cst_scalar.func[0],
+    .func is just an alias returning self) reads exactly like the field-based
+    parameter classes below (nn_cst_young_modulus, nn_uniform_param), so it
+    can be freely combined/summed with them in the same UFL expression (e.g.
+    summing volumic fractions across inclusions of different kinds, some
+    spatially uniform and some not).
+
     Parameters:
     -----------
-        value : scalar value that is applied to the whole field as a constant value
-        V_scalar : functionspace for constant scalar value. Discontinuous, constant per element : fem.functionspace(domain, ("DG", deg_scal, (1,)))
-        
+        value : scalar value
+        V_scalar : functionspace this parameter conceptually lives on. Only
+            used to recover the mesh (V_scalar.mesh) ; kept as a constructor
+            argument for drop-in compatibility with every former
+            cst_param(value, V_scalar) call site.
+
     Attributes:
     -----------
-        func : field that contains the constant value of the parameter.
-            access in the construction of the fenicsx forms and expression using cst_param.func[0] 
-        
+        const : the underlying shape-(1,) fem.Constant. Index with [0] (or
+            equivalently .func[0]) to get a scalar UFL expression.
+
     Methods:
     -----------
-        update_func : pass for consistency    
+        set_value : update the runtime value in place (no recompilation)
+        update_func : no-op, kept for interface consistency with the other parameter classes
     """
-
     def __init__(self, value, V_scalar):
-        #self.V_scalar = geom['scalar spacefunction'] 
-        self.value = value
-        self.func = fem.Function(V_scalar)
-        self.func.x.array[:] = self.value*np.ones(self.func.x.array.shape)
-        self.func.x.scatter_forward()
-        
+        self.V_scalar = V_scalar
+        domain = V_scalar.mesh
+        self.value = np.float64(value)
+        self.const = fem.Constant(domain, np.array([self.value], dtype=np.float64))
+
+    @property
+    def func(self):
+        """Alias so cst_scalar.func[0] reads exactly like cst_param used to, and
+        like the other field-based parameter classes below (nn_cst_young_modulus,
+        nn_uniform_param)."""
+        return self.const
+
+    def __getitem__(self, idx):
+        """cst_scalar[0] is equivalent to cst_scalar.func[0]."""
+        return self.const[idx]
+
+    def set_value(self, value):
+        """Update the constant's runtime value in place. No form/expression rebuilt."""
+        self.value = np.float64(value)
+        self.const.value = np.array([self.value], dtype=np.float64)
+
     def update_func(self):
-        """
-        don't change nothing ; just in case is called. Should be removed
-        """
+        """no-op ; kept so cst_scalar exposes the same interface as the other parameter classes"""
         pass
-        
 
 
 #-----------------------------------------------------------------------------#
@@ -169,14 +211,14 @@ class nn_cst_young_modulus:
             # syntax based on a y : x -> y(x) simple scalar function
             # plateau y0 for x<x0 ; y1 for x > x1 ; piecewise linear otherwise
             # could be expanded for multiple components
-            y0 = fem.Constant(self.domain, np.float64(self.value[0][0]))
-            y1 = fem.Constant(self.domain, np.float64(self.value[0][1]))
-            x0 = fem.Constant(self.domain, np.float64(self.value[1][0]))
-            x1 = fem.Constant(self.domain, np.float64(self.value[1][1]))
+            self.y0_const = fem.Constant(self.domain, np.float64(self.value[0][0]))
+            self.y1_const = fem.Constant(self.domain, np.float64(self.value[0][1]))
+            self.x0_const = fem.Constant(self.domain, np.float64(self.value[1][0]))
+            self.x1_const = fem.Constant(self.domain, np.float64(self.value[1][1]))
             
-            param_expr = ufl.conditional(self.scalar_form>x1, y1, 
-                                         ufl.conditional(self.scalar_form<x0, y0, 
-                                                        y0+(y1-y0)/(x1-x0)*(self.scalar_form-x0)))
+            param_expr = ufl.conditional(self.scalar_form>self.x1_const, self.y1_const, 
+                                         ufl.conditional(self.scalar_form<self.x0_const, self.y0_const, 
+                                                        self.y0_const+(self.y1_const-self.y0_const)/(self.x1_const-self.x0_const)*(self.scalar_form-self.x0_const)))
             
             self.param_expr = fem.Expression(param_expr, self.V_scalar.element.interpolation_points())
         elif self.param_type=='Exponential':
@@ -186,12 +228,15 @@ class nn_cst_young_modulus:
             e = self.value[0]
             k = self.value[1]
             l = self.value[2]
-            param_form = 0 
-            for i in range(len(e)):    
-                # e0 = fem.Constant(self.domain, np.float64(e[i]))
-                # k0 = fem.Constant(self.domain, np.float64(k[i]))
-                # l0 = fem.Constant(self.domain, np.float64(l[i]))
-                param_form += e[i]*ufl.exp(k[i]*(self.scalar_form-l[i]))
+            # Store as fem.Constant so the coefficients live outside the symbolic
+            # form: their runtime value can change (e.g. during calibration)
+            # without altering the UFL form signature used as the FFCx JIT cache key.
+            self.e_const = [fem.Constant(self.domain, np.float64(ei)) for ei in e]
+            self.k_const = [fem.Constant(self.domain, np.float64(ki)) for ki in k]
+            self.l_const = [fem.Constant(self.domain, np.float64(li)) for li in l]
+            param_form = 0
+            for i in range(len(e)):
+                param_form += self.e_const[i]*ufl.exp(self.k_const[i]*(self.scalar_form-self.l_const[i]))
             
             self.param_expr = fem.Expression(param_form, self.V_scalar.element.interpolation_points())
             
@@ -203,6 +248,32 @@ class nn_cst_young_modulus:
         """
         self.func.interpolate(self.param_expr, self.cells)
         self.func.x.scatter_forward()
+
+    def set_value(self, value):
+        """
+        Update the law's coefficients in place (no recompilation). Must be called
+        AFTER init_func() has run once (i.e. after the owning inclusion's
+        microscopic_mech() has been called, typically inside build_weak_form()) since
+        it only updates the fem.Constant objects already created by init_func -
+        it does not rebuild self.param_expr.
+
+        value must have the same structure as at construction :
+            - 'Exponential' : [[e0,e1,...], [k0,k1,...], [l0,l1,...]]
+            - 'Plateau-Ramp-Plateau' : [[y0,y1], [x0,x1]]
+        """
+        self.value = value
+        if self.param_type == 'Exponential':
+            e, k, l = value
+            for i in range(len(e)):
+                self.e_const[i].value = np.float64(e[i])
+                self.k_const[i].value = np.float64(k[i])
+                self.l_const[i].value = np.float64(l[i])
+        elif self.param_type == 'Plateau-Ramp-Plateau':
+            self.y0_const.value = np.float64(value[0][0])
+            self.y1_const.value = np.float64(value[0][1])
+            self.x0_const.value = np.float64(value[1][0])
+            self.x1_const.value = np.float64(value[1][1])
+        self.update_func()
 
 #-----------------------------------------------------------------------------#
 #   Volumic Fractions
@@ -242,6 +313,18 @@ class nn_uniform_param:
         self.func.interpolate(lambda x: spline_func(x[0]), self.cells)
         self.func.x.scatter_forward()
 
+    def set_value(self, value):
+        """
+        Update the spline control points in place (no recompilation) : value is a
+        two element list [x_control_points, y_control_points], same shape as at
+        construction. Re-interpolation with a python callable does not involve
+        FFCx / the JIT compiler.
+        """
+        self.value = value
+        spline_func = interp1d(self.value[0], self.value[1], kind='linear')
+        self.func.interpolate(lambda x: spline_func(x[0]), self.cells)
+        self.func.x.scatter_forward()
+
 
 class matrix_volumic_frac:
     """
@@ -276,4 +359,14 @@ class matrix_volumic_frac:
         """
         self.vol_frac_expr = fem.Expression(1-inclusion_form[0], self.V_scalar.element.interpolation_points())
         self.func.interpolate(self.vol_frac_expr, self.cells)
+
+    def refresh(self):
+        """
+        Re-interpolate the matrix volumic fraction using the expression already
+        built by create_field(). Call this after any inclusion's volumic fraction
+        has been changed via set_value(), since it is defined as a complement to
+        the (unchanged) symbolic sum of inclusion fractions - no recompilation.
+        """
+        self.func.interpolate(self.vol_frac_expr, self.cells)
+        self.func.x.scatter_forward()
         

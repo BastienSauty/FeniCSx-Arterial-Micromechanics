@@ -1,54 +1,170 @@
 {
-    "matrix" : {
+    "matrix": {
         "type": "matrix",
-        "young" : 0.05,
-        "young_type" : "Constant",
-        "poisson" : 0.45
+        "young": 0.05,
+        "young_type": "Constant",
+        "poisson": 0.45
     },
     "cells": {
         "type": "prolate_spheroid",
         "young": 0.01,
-        "young_type" : "Constant",
-        "poisson" : 0.45,
+        "young_type": "Constant",
+        "poisson": 0.45,
         "volumic_fraction": 0.24,
         "shape_ratio": 0.161,
         "theta": 90,
         "phi": 90
     },
-    "collagen0" :{
-            "type": "cylinder",
-            "young" : [[0.67],[3.64],[1.1]],
-            "young_type":"Exponential",
-            "poisson" : 0.34,
-            "volumic_fraction" : 0.0575,
-            "theta" : -41,
-            "phi" : 90
+    "collagen0": {
+        "type": "cylinder",
+        "young": [
+            [
+                0.67
+            ],
+            [
+                4
+            ],
+            [
+                1.1
+            ]
+        ],
+        "young_type": "Exponential",
+        "poisson": 0.34,
+        "volumic_fraction": 0.020967,
+        "theta": -78.312,
+        "phi": 90
     },
-    "collagen1" :{
-            "type": "cylinder",
-            "young" : [[0.67],[3.64],[1.1]],
-            "young_type":"Exponential",
-            "poisson" : 0.34,
-            "volumic_fraction" : 0.0575,
-            "theta" : 41,
-            "phi" : 90
+    "collagen1": {
+        "type": "cylinder",
+        "young": [
+            [
+                0.67
+            ],
+            [
+                4
+            ],
+            [
+                1.1
+            ]
+        ],
+        "young_type": "Exponential",
+        "poisson": 0.34,
+        "volumic_fraction": 0.021778,
+        "theta": -55.938,
+        "phi": 90
     },
-    "collagen2" :{
-            "type": "cylinder",
-            "young" : [[0.67],[3.64],[1.1]],
-            "young_type":"Exponential",
-            "poisson" : 0.34,
-            "volumic_fraction" : 0.0575,
-            "theta" : -59.5,
-            "phi" : 90
+    "collagen2": {
+        "type": "cylinder",
+        "young": [
+            [
+                0.67
+            ],
+            [
+                4
+            ],
+            [
+                1.1
+            ]
+        ],
+        "young_type": "Exponential",
+        "poisson": 0.34,
+        "volumic_fraction": 0.026685,
+        "theta": -33.562,
+        "phi": 90
     },
-    "collagen3" :{
-            "type": "cylinder",
-            "young" : [[0.67],[3.64],[1.1]],
-            "young_type":"Exponential",
-            "poisson" : 0.34,
-            "volumic_fraction" : 0.0575,
-            "theta" : 59.5,
-            "phi" : 90
+    "collagen3": {
+        "type": "cylinder",
+        "young": [
+            [
+                0.67
+            ],
+            [
+                4
+            ],
+            [
+                1.1
+            ]
+        ],
+        "young_type": "Exponential",
+        "poisson": 0.34,
+        "volumic_fraction": 0.041461,
+        "theta": -11.188,
+        "phi": 90
+    },
+    "collagen4": {
+        "type": "cylinder",
+        "young": [
+            [
+                0.67
+            ],
+            [
+                4
+            ],
+            [
+                1.1
+            ]
+        ],
+        "young_type": "Exponential",
+        "poisson": 0.34,
+        "volumic_fraction": 0.045288,
+        "theta": 11.188,
+        "phi": 90
+    },
+    "collagen5": {
+        "type": "cylinder",
+        "young": [
+            [
+                0.67
+            ],
+            [
+                4
+            ],
+            [
+                1.1
+            ]
+        ],
+        "young_type": "Exponential",
+        "poisson": 0.34,
+        "volumic_fraction": 0.029647,
+        "theta": 33.562,
+        "phi": 90
+    },
+    "collagen6": {
+        "type": "cylinder",
+        "young": [
+            [
+                0.67
+            ],
+            [
+                4
+            ],
+            [
+                1.1
+            ]
+        ],
+        "young_type": "Exponential",
+        "poisson": 0.34,
+        "volumic_fraction": 0.022626,
+        "theta": 55.938,
+        "phi": 90
+    },
+    "collagen7": {
+        "type": "cylinder",
+        "young": [
+            [
+                0.67
+            ],
+            [
+                4
+            ],
+            [
+                1.1
+            ]
+        ],
+        "young_type": "Exponential",
+        "poisson": 0.34,
+        "volumic_fraction": 0.021549,
+        "theta": 78.312,
+        "phi": 90
     }
 }
