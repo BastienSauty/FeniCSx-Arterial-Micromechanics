@@ -4,6 +4,9 @@ import sys
 
 from petsc4py.PETSc import ScalarType
 
+import time
+import resource
+
 
 from dolfinx import mesh, fem, plot, io
 import dolfinx.fem.petsc
@@ -59,6 +62,9 @@ from Multiscale_Framework.function_modules.nlog_function import (
 )
 
 ##########################################################################
+## Mechanical Problem defined as a class for axisymmetric problem
+##########################################################################
+
 # Safety net / kill switch for the kinematics-materialization patch (2026-08-17)
 ##########################################################################
 # Mechanical_Problem_axi.build_weak_form() used to build Fn/J/Finv/B/tau as
@@ -88,13 +94,26 @@ from Multiscale_Framework.function_modules.nlog_function import (
 # 2026-08-17 update) for the full reasoning and the before/after
 # verification procedure.
 #
+# NOTE (2026-08-19): Bastien separately experimented with quadrature_degree=3
+# in his own working copy of this file, on the (reasonable-looking but WRONG)
+# assumption that lower quadrature order would bound compile/RAM cost the
+# same way the inclusions_class.py bundling did. Empirically it did not:
+# quadrature_degree=6 + MATERIALIZE_KINEMATICS=True passed
+# verify_mech_patch_equality_topatch.py with LOWER peak RAM than degree=3.
+# quadrature_degree doesn't change the O(N) term count (that's inclusion-
+# count-driven, not integration-order-driven) - capping it artificially low
+# likely forces a less-optimized FFCx code-generation path for this
+# already-heavy integrand rather than shrinking it. Left at 6 here to match
+# the empirically-verified working configuration; don't re-lower this without
+# re-running the equality+RAM check. Only Mechanical_Problem_axi is patched;
+# Mechanical_Problem_3D is unused by the current SA/calibration and is
+# deliberately left untouched.
+#
 # Set this to False to instantly fall back to the original, pre-patch
 # symbolic behavior (e.g. if something looks wrong and you need to rule this
 # patch out without reverting the file).
 MATERIALIZE_KINEMATICS = True
 
-##########################################################################
-## Mechanical Problem defined as a class for axisymmetric problem
 ##########################################################################
 
 class Mechanical_Problem_axi:
@@ -323,22 +342,22 @@ class Mechanical_Problem_axi:
 
         # Green-Lagrange tensors for directional derivative of residuals
         dE = 1/2*(ufl.dot(self.Fn.T, self.grad_axi(self.v)) + ufl.dot(self.grad_axi(self.v).T, self.Fn))
-
+        
         # Incremental kinematic for directional derivative
         l = ufl.dot(self.grad_axi(self.du), self.Finv) # Spatial velocity gradient
         d = ufl.sym(l)
-
+        
         #---------------------------------------------------------------------#
         # Incremental functions
-        self.duj = fem.Function(self.V_u) # increment of displacement
+        self.duj = fem.Function(self.V_u) # increment of displacement 
         self.dSint = fem.Function(self.V_mandel) # increment of stress, in Mandel
         # -> dSint is the increment of stress for duj displacement
         dFj = self.grad_axi(self.duj)
-
+      
         # Incremental kinematic for stress integration
         lj = ufl.dot(dFj, self.Finv) # Spatial velocity gradient
         dj = ufl.sym(lj)
-
+        
         #---------------------------------------------------------------------#
         # Push forward PKII stress into Kirchhoff stress
         # tau = dot(Fn, Sn, Fn.T) also only depends on un/Sn (never du/duj/v) -
@@ -353,7 +372,7 @@ class Mechanical_Problem_axi:
             tau = self.tau
         else:
             tau = tau_sym
-
+        
         # behavior law : for each material
         for mat_name, mat in self.subdomain.items():
             mat.F_res = ufl.inner(Voigt2Tensor(self.Sn), dE)*self.r*self.dx(mat.tag)
@@ -386,10 +405,10 @@ class Mechanical_Problem_axi:
         
         self.dF_res = sum(mat.dF_res for mat_name, mat in self.subdomain.items())
         self.F_res = sum(mat.F_res for mat_name, mat in self.subdomain.items())
-
+        
         print('Residuals and Stress Increments are defined\n', flush=True)
-
-
+        
+        
     ##########################################################################
 
     def update_kinematics(self):
@@ -433,7 +452,7 @@ class Mechanical_Problem_axi:
             mat.matrix.update_micro_mech()
             for incl in mat.inclusions.values():
                 incl.update_micro_mech() # compute the increment of stress in the inclusions and new behavior
-
+            
             if type(mat) is Homogenized_MT_material:
                 # separation of the forms to save time in preprocess
                 mat.H2inv.update_func()

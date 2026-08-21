@@ -1,1 +1,7 @@
-{"ri": 0.339, "re": 0.423, "area": 0.18354481843723128, "ri_adv": 0.4046, "advTF": 0.2385, "lz": 0.1, "nr": 20, "nz": 5, "objective_derivative": "Jaumann", "int_scheme": "Euler", "n_int": 30, "n_NR": 100, "XDMF_export": 0, "load_phase": [[30, 0, 0.046, 0], [70, 0, 0.046, 140]]}
+{
+    "ri": 0.37957,
+    "re": 0.45,
+    "ri_adv": 0.4342,
+    "area": 0.18354481843723128,
+    "advTF": 0.2385,
+"lz": 0.1, "nr": 20, "nz": 5, "objective_derivative": "Jaumann", "int_scheme": "Euler", "n_int": 30, "n_NR": 100, "XDMF_export": 0, "load_phase": [[30, 0, 0.046, 0], [70, 0, 0.046, 140]]}

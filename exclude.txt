@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+.git
+.venv
+ChIV_ModellingPassiveArterialTissue
+ChV_MultiscaleActiveStressRegulation
+Claude_debugging_Erwan
+images_output
+jit_cache
+outputs

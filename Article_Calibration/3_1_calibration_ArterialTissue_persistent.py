@@ -166,7 +166,7 @@ folder_name = 'Article_Calibration'
 name = '3_1_calibration_ArterialTissue_persistent'
 
 simu_card_name = 'json_cards/simu_card_calib_gross.json'
-media_card_name = 'json_cards/media_card_calib_N5.json'
+media_card_name = 'json_cards/media_card_calib_N4.json'
 adventitia_card_name = 'json_cards/adventitia_card_calib_N8.json'
 
 simu_card = load_JSON(simu_card_name)
@@ -274,7 +274,8 @@ PARAMETER_SPECS = [
     #           targets=[("adventitia", collagen_keys_adventitia)], field_="young", subindex=2, bounds=(1.05, 1.3)),
     # ParamSpec("cells young (SMC)",  
     #       targets=[("media", ["cells"])], field_="young", bounds=(0.001, 0.05)),
-    ParamSpec("re", is_geometry=True, bounds=(0.43, 0.48)),
+    ParamSpec("matrix young (media)", targets=[("media", ["matrix"]), ("adventitia", ["matrix"])], field_="young", bounds=(0.04, 0.2)),
+    # ParamSpec("re", is_geometry=True, bounds=(0.43, 0.48)),
 ]
 # Example of extending the calibration to more physical parameters, left
 # commented out - just uncomment to add them as free parameters. A single
@@ -356,39 +357,7 @@ def cost_function(x, bounds, specs, press_exp, re_exp, re_sd_exp, F_zz_exp, F_zz
         chi_square_force = np.sum(((F_zz_exp - F_zz_interp)/(F_zz_sd_exp))**2)
         chi_square_rad = np.sum(((re_exp - re_interp)/(re_sd_exp))**2)
         cost = 1/(2*len(re_interp))*chi_square_rad + 1/(2*len(F_zz_interp))*chi_square_force
-    
         
-        press_list = 7500.62*result.outputs['press'][:]
-        F_zz_list = result.outputs['F_zz']*1000
-        re_list = result.outputs['re_d']
-        
-        interp_func_re = interp1d(press_list, re_list, kind='linear', bounds_error=False, fill_value="extrapolate")
-        interp_func_F_zz = interp1d(press_list, F_zz_list, kind='linear', bounds_error=False, fill_value="extrapolate")
-        
-        F_zz_interp = interp_func_F_zz(press_exp)
-        re_interp = interp_func_re(press_exp)
-        
-        # # --- derivative branch ---
-        # dF_zz_list_dp = np.gradient(F_zz_list, press_list)
-        # dre_list_dp = np.gradient(re_list, press_list)
-        
-        # interp_func_dF_zz_dp = interp1d(press_list, dF_zz_list_dp, kind='linear', bounds_error=False, fill_value="extrapolate")
-        # interp_func_dre_dp = interp1d(press_list, dre_list_dp, kind='linear', bounds_error=False, fill_value="extrapolate")
-        
-        # dF_zz_interp_dp = interp_func_dF_zz_dp(press_exp)
-        # dre_interp_dp = interp_func_dre_dp(press_exp)
-        
-        dF_zz_interp_dp = np.gradient(F_zz_interp, press_exp)
-        dre_interp_dp = np.gradient(re_interp, press_exp)
-        
-        if fit_mode == 'value':
-            chi_square_force = np.sum(((F_zz_exp - F_zz_interp)/(F_zz_sd_exp))**2)
-            chi_square_rad   = np.sum(((re_exp - re_interp)/(re_sd_exp))**2)
-        elif fit_mode == 'derivative':
-            chi_square_force = np.sum(((dF_zz_exp_dp - dF_zz_interp_dp)/(dF_zz_sem_dp))**2)
-            chi_square_rad   = np.sum(((dre_exp_dp - dre_interp_dp)/(dre_sem_dp))**2)
-        
-        cost = 1/(2*len(re_interp))*chi_square_rad + 1/(2*len(F_zz_interp))*chi_square_force
     print(f"Error measure is {cost} for x : {x_real}")
     if cost < best_error:
         best_error = cost

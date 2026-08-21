@@ -237,7 +237,7 @@ class Mechanical_Problem_axi:
         self.r = self.x[0]
         
         # Defining Integrals
-        self.metadata = {"quadrature_degree": 3}
+        self.metadata = {"quadrature_degree": 6}
         #self.ds = ufl.Measure('ds', domain=self.domain, metadata=metadata)
         self.dx = ufl.Measure("dx", domain=self.domain, metadata=self.metadata, subdomain_data=self.meshtags)
         
