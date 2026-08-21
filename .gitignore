@@ -1,0 +1,37 @@
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pycache
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# FEniCSx outputs
+images_output/
+outputs/
+Claude_debugging_Erwan/
+*.xdmf
+*.h5
+*.vtu
+*.pvd
+*.pkl
+*.log
+
+# IDEs / editors
+.vscode/
+.idea/
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+
+# Temporary files
+*.swp
+*~
+
